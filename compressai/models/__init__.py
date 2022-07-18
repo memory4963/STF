@@ -15,3 +15,4 @@
 
 from .stf import SymmetricalTransFormer
 from .cnn import WACNN
+from .tbc import TransformerBasedCoding

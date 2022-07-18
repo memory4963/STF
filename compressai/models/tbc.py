@@ -4,6 +4,7 @@ import torch.nn.functional as F
 import numpy as np
 from timm.models.layers import DropPath, to_2tuple, trunc_normal_
 from .utils import conv, update_registered_buffers, deconv
+import math
 
 import torch.nn as nn
 from compressai.entropy_models import EntropyBottleneck, GaussianConditional
@@ -200,10 +201,11 @@ class SwinTransformerBlock(nn.Module):
 
 
 class PatchMerging(nn.Module):
-    def __init__(self, dim, norm_layer=nn.LayerNorm):
+    def __init__(self, dim, odim, norm_layer=nn.LayerNorm):
         super().__init__()
         self.dim = dim
-        self.reduction = nn.Linear(4 * dim, 2 * dim, bias=False)
+        self.odim = odim
+        self.reduction = nn.Linear(4 * dim, odim, bias=False)
         self.norm = norm_layer(4 * dim)
 
     def forward(self, x, H, W):
@@ -241,10 +243,11 @@ class PatchSplit(nn.Module):
         dim (int): Number of input channels.
         norm_layer (nn.Module, optional): Normalization layer.  Default: nn.LayerNorm
     """
-    def __init__(self, dim, norm_layer=nn.LayerNorm):
+    def __init__(self, dim, odim, norm_layer=nn.LayerNorm):
         super().__init__()
         self.dim = dim
-        self.reduction = nn.Linear(dim, dim * 2, bias=False)
+        self.odim = odim
+        self.reduction = nn.Linear(dim, odim * 4, bias=False)
         self.norm = norm_layer(dim)
         self.shuffle = nn.PixelShuffle(2)
 
@@ -253,15 +256,16 @@ class PatchSplit(nn.Module):
         assert L == H * W, "input feature has wrong size"
 
         x = self.norm(x)
-        x = self.reduction(x)           # B, L, C
-        x = x.permute(0, 2, 1).contiguous().view(B, 2*C, H, W)
-        x = self.shuffle(x)             # B, C//2 ,2H, 2W
+        x = self.reduction(x)
+        x = x.permute(0, 2, 1).contiguous().view(B, -1, H, W)
+        x = self.shuffle(x)
         x = x.permute(0, 2, 3, 1).contiguous().view(B, 4 * L, -1)
         return x
 
 class BasicLayer(nn.Module):
     def __init__(self,
                  dim,
+                 odim,
                  depth,
                  num_heads,
                  window_size=7,
@@ -281,11 +285,16 @@ class BasicLayer(nn.Module):
         self.depth = depth
         self.use_checkpoint = use_checkpoint
 
+        # patch merging layer
+        if downsample is not None:
+            self.downsample = downsample(dim=dim, odim=odim, norm_layer=norm_layer)
+        else:
+            self.downsample = None
+
         # build blocks
         self.blocks = nn.ModuleList([
             SwinTransformerBlock(
-
-                dim=dim,
+                dim=odim if downsample==PatchMerging else dim,
                 num_heads=num_heads,
                 window_size=window_size,
                 shift_size=0 if (i % 2 == 0) else window_size // 2,
@@ -299,18 +308,16 @@ class BasicLayer(nn.Module):
                 inverse=inverse)
             for i in range(depth)])
 
-        # patch merging layer
-        if downsample is not None:
-            self.downsample = downsample(dim=dim, norm_layer=norm_layer)
-        else:
-            self.downsample = None
-
     def forward(self, x, H, W):
         """ Forward function.
         Args:
             x: Input feature, tensor size (B, H*W, C).
             H, W: Spatial resolution of the input feature.
         """
+
+        if self.downsample is not None and isinstance(self.downsample, PatchMerging):
+            x = self.downsample(x, H, W)
+            H, W = (H + 1) // 2, (W + 1) // 2
 
         # calculate attention mask for SW-MSA
         Hp = int(np.ceil(H / self.window_size)) * self.window_size
@@ -336,15 +343,12 @@ class BasicLayer(nn.Module):
         for blk in self.blocks:
             blk.H, blk.W = H, W
             x = blk(x, attn_mask)
-        if self.downsample is not None:
-            x_down = self.downsample(x, H, W)
-            if isinstance(self.downsample, PatchMerging):
-                Wh, Ww = (H + 1) // 2, (W + 1) // 2
-            elif isinstance(self.downsample, PatchSplit):
-                Wh, Ww = H * 2, W * 2
-            return x_down, Wh, Ww
-        else:
-            return x, H, W
+
+        if self.downsample is not None and isinstance(self.downsample, PatchSplit):
+            x = self.downsample(x, H, W)
+            H, W = H * 2, W * 2
+
+        return x, H, W
 
 
 class PatchEmbed(nn.Module):
@@ -389,11 +393,13 @@ class TransformerBasedCoding(CompressionModel):
                  embed_dim=48,
                  depths=[2, 2, 6, 2],
                  h_depths=[5, 1],
-                 num_heads=[32, 32, 32, 32],
-                 h_num_heads=[32, 32],
+                 num_heads=32,
+                 h_num_heads=32,
+                 channels=[96,128,160,192],
+                 h_channels=[96, 128],
                  window_size=8,
                  h_window_size=4,
-                 num_slices=12,
+                 num_slices=10,
                  mlp_ratio=4.,
                  qkv_bias=True,
                  qk_scale=None,
@@ -409,6 +415,8 @@ class TransformerBasedCoding(CompressionModel):
         self.pretrain_img_size = pretrain_img_size
         self.num_layers = len(depths)
         self.num_h_layers = len(h_depths)
+        self.channels = channels
+        self.h_channels = h_channels
         self.embed_dim = embed_dim
         self.patch_norm = patch_norm
         self.frozen_stages = frozen_stages
@@ -424,13 +432,15 @@ class TransformerBasedCoding(CompressionModel):
         # stochastic depth
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, sum(depths))]  # stochastic depth decay rule
 
+        in_dims = [3] + channels[:-1]
         # build layers
         self.layers = nn.ModuleList()
         for i_layer in range(self.num_layers):
             layer = BasicLayer(
-                dim=int(embed_dim * 2 ** i_layer),
+                dim=in_dims[i_layer],
+                odim=channels[i_layer],
                 depth=depths[i_layer],
-                num_heads=num_heads[i_layer],
+                num_heads=num_heads,
                 window_size=window_size,
                 mlp_ratio=mlp_ratio,
                 qkv_bias=qkv_bias,
@@ -439,28 +449,27 @@ class TransformerBasedCoding(CompressionModel):
                 attn_drop=attn_drop_rate,
                 drop_path=dpr[sum(depths[:i_layer]):sum(depths[:i_layer + 1])],
                 norm_layer=norm_layer,
-                downsample=PatchMerging if (i_layer < self.num_layers - 1) else None,
+                downsample=PatchMerging,
                 use_checkpoint=use_checkpoint,
                 inverse=False)
             self.layers.append(layer)
 
-        depths = depths[::-1]
-        num_heads = num_heads[::-1]
         self.syn_layers = nn.ModuleList()
         for i_layer in range(self.num_layers):
             layer = BasicLayer(
-                dim=int(embed_dim * 2 ** (3-i_layer)),
-                depth=depths[i_layer],
-                num_heads=num_heads[i_layer],
+                dim=channels[::-1][i_layer],
+                odim=in_dims[::-1][i_layer],
+                depth=depths[::-1][i_layer],
+                num_heads=num_heads,
                 window_size=window_size,
                 mlp_ratio=mlp_ratio,
                 qkv_bias=qkv_bias,
                 qk_scale=qk_scale,
                 drop=drop_rate,
                 attn_drop=attn_drop_rate,
-                drop_path=dpr[sum(depths[:i_layer]):sum(depths[:i_layer + 1])],
+                drop_path=dpr[sum(depths[::-1][:i_layer]):sum(depths[::-1][:i_layer + 1])],
                 norm_layer=norm_layer,
-                downsample=PatchSplit if (i_layer < self.num_layers - 1) else None,
+                downsample=PatchSplit,
                 use_checkpoint=use_checkpoint,
                 inverse=True)
             self.syn_layers.append(layer)
@@ -475,62 +484,104 @@ class TransformerBasedCoding(CompressionModel):
         self.g_a = None
         self.g_s = None
 
-        self.h_a = None
-        self.h_layers = nn.ModuleList()
+        h_in_dims = channels[-1:] + h_channels[:-1]
+        self.h_a = nn.ModuleList()
         for i_layer in range(self.num_h_layers):
             layer = BasicLayer(
-                dim=int(embed_dim * 2 ** i_layer),
-                depth=depths[i_layer],
-                num_heads=h_num_heads[i_layer],
+                dim=h_in_dims[i_layer],
+                odim=h_channels[i_layer],
+                depth=h_depths[i_layer],
+                num_heads=h_num_heads,
                 window_size=h_window_size,
                 mlp_ratio=mlp_ratio,
                 qkv_bias=qkv_bias,
                 qk_scale=qk_scale,
                 drop=drop_rate,
                 attn_drop=attn_drop_rate,
-                drop_path=dpr[sum(depths[:i_layer]):sum(depths[:i_layer + 1])],
+                drop_path=dpr[sum(h_depths[:i_layer]):sum(h_depths[:i_layer + 1])],
                 norm_layer=norm_layer,
-                downsample=PatchMerging if (i_layer < self.num_layers - 1) else None,
+                downsample=PatchMerging,
                 use_checkpoint=use_checkpoint,
                 inverse=False)
+            self.h_a.append(layer)
 
-        self.h_a = nn.Sequential(
-            conv3x3(384, 384),
-            nn.GELU(),
-            conv3x3(384, 336),
-            nn.GELU(),
-            conv3x3(336, 288, stride=2),
-            nn.GELU(),
-            conv3x3(288, 240),
-            nn.GELU(),
-            conv3x3(240, 192, stride=2),
-        )
+        self.h_mean_s = nn.ModuleList()
+        for i_layer in range(self.num_h_layers):
+            layer = BasicLayer(
+                dim=h_channels[::-1][i_layer],
+                odim=h_in_dims[::-1][i_layer],
+                depth=h_depths[::-1][i_layer],
+                num_heads=h_num_heads,
+                window_size=h_window_size,
+                mlp_ratio=mlp_ratio,
+                qkv_bias=qkv_bias,
+                qk_scale=qk_scale,
+                drop=drop_rate,
+                attn_drop=attn_drop_rate,
+                drop_path=dpr[sum(h_depths[::-1][:i_layer]):sum(h_depths[::-1][:i_layer + 1])],
+                norm_layer=norm_layer,
+                downsample=PatchSplit,
+                use_checkpoint=use_checkpoint,
+                inverse=True)
+            self.h_mean_s.append(layer)
 
-        self.h_mean_s = nn.Sequential(
-            conv3x3(192, 240),
-            nn.GELU(),
-            subpel_conv3x3(240, 288, 2),
-            nn.GELU(),
-            conv3x3(288, 336),
-            nn.GELU(),
-            subpel_conv3x3(336, 384, 2),
-            nn.GELU(),
-            conv3x3(384, 384),
-        )
-        self.h_scale_s = nn.Sequential(
-            conv3x3(192, 240),
-            nn.GELU(),
-            subpel_conv3x3(240, 288, 2),
-            nn.GELU(),
-            conv3x3(288, 336),
-            nn.GELU(),
-            subpel_conv3x3(336, 384, 2),
-            nn.GELU(),
-            conv3x3(384, 384),
-        )
+        self.h_scale_s = nn.ModuleList()
+        for i_layer in range(self.num_h_layers):
+            layer = BasicLayer(
+                dim=h_channels[::-1][i_layer],
+                odim=h_in_dims[::-1][i_layer],
+                depth=h_depths[::-1][i_layer],
+                num_heads=h_num_heads,
+                window_size=h_window_size,
+                mlp_ratio=mlp_ratio,
+                qkv_bias=qkv_bias,
+                qk_scale=qk_scale,
+                drop=drop_rate,
+                attn_drop=attn_drop_rate,
+                drop_path=dpr[sum(h_depths[::-1][:i_layer]):sum(h_depths[::-1][:i_layer + 1])],
+                norm_layer=norm_layer,
+                downsample=PatchSplit,
+                use_checkpoint=use_checkpoint,
+                inverse=True)
+            self.h_scale_s.append(layer)
+
+        # self.h_a = nn.Sequential(
+        #     conv3x3(384, 384),
+        #     nn.GELU(),
+        #     conv3x3(384, 336),
+        #     nn.GELU(),
+        #     conv3x3(336, 288, stride=2),
+        #     nn.GELU(),
+        #     conv3x3(288, 240),
+        #     nn.GELU(),
+        #     conv3x3(240, 192, stride=2),
+        # )
+
+        # self.h_mean_s = nn.Sequential(
+        #     conv3x3(192, 240),
+        #     nn.GELU(),
+        #     subpel_conv3x3(240, 288, 2),
+        #     nn.GELU(),
+        #     conv3x3(288, 336),
+        #     nn.GELU(),
+        #     subpel_conv3x3(336, 384, 2),
+        #     nn.GELU(),
+        #     conv3x3(384, 384),
+        # )
+        # self.h_scale_s = nn.Sequential(
+        #     conv3x3(192, 240),
+        #     nn.GELU(),
+        #     subpel_conv3x3(240, 288, 2),
+        #     nn.GELU(),
+        #     conv3x3(288, 336),
+        #     nn.GELU(),
+        #     subpel_conv3x3(336, 384, 2),
+        #     nn.GELU(),
+        #     conv3x3(384, 384),
+        # )
         self.cc_mean_transforms = nn.ModuleList(
             nn.Sequential(
-                conv(384 + 32 * min(i, 6), 224, stride=1, kernel_size=3),
+                conv(self.channels[-1] + math.ceil(channels[-1]/num_slices) * min(i, self.max_support_slices), 224, stride=1, kernel_size=3),
                 nn.GELU(),
                 conv(224, 176, stride=1, kernel_size=3),
                 nn.GELU(),
@@ -538,12 +589,12 @@ class TransformerBasedCoding(CompressionModel):
                 nn.GELU(),
                 conv(128, 64, stride=1, kernel_size=3),
                 nn.GELU(),
-                conv(64, 32, stride=1, kernel_size=3),
+                conv(64, math.ceil(channels[-1]/num_slices) if i<num_slices-1 else channels[-1]-math.ceil(channels[-1]/num_slices)*(num_slices-1), stride=1, kernel_size=3),
             ) for i in range(num_slices)
         )
         self.cc_scale_transforms = nn.ModuleList(
             nn.Sequential(
-                conv(384 + 32 * min(i, 6), 224, stride=1, kernel_size=3),
+                conv(self.channels[-1] + math.ceil(channels[-1]/num_slices) * min(i, self.max_support_slices), 224, stride=1, kernel_size=3),
                 nn.GELU(),
                 conv(224, 176, stride=1, kernel_size=3),
                 nn.GELU(),
@@ -551,12 +602,12 @@ class TransformerBasedCoding(CompressionModel):
                 nn.GELU(),
                 conv(128, 64, stride=1, kernel_size=3),
                 nn.GELU(),
-                conv(64, 32, stride=1, kernel_size=3),
+                conv(64, math.ceil(channels[-1]/num_slices) if i<num_slices-1 else channels[-1]-math.ceil(channels[-1]/num_slices)*(num_slices-1), stride=1, kernel_size=3),
             ) for i in range(num_slices)
         )
         self.lrp_transforms = nn.ModuleList(
             nn.Sequential(
-                conv(384 + 32 * min(i + 1, 7), 224, stride=1, kernel_size=3),
+                conv(self.channels[-1] + math.ceil(self.channels[-1]/num_slices) * min(i + 1, self.max_support_slices+1) if i<num_slices-1 else self.channels[-1] + math.ceil(self.channels[-1]/num_slices) * min(i, self.max_support_slices) + channels[-1]-math.ceil(channels[-1]/num_slices)*(num_slices-1), 224, stride=1, kernel_size=3),
                 nn.GELU(),
                 conv(224, 176, stride=1, kernel_size=3),
                 nn.GELU(),
@@ -564,10 +615,10 @@ class TransformerBasedCoding(CompressionModel):
                 nn.GELU(),
                 conv(128, 64, stride=1, kernel_size=3),
                 nn.GELU(),
-                conv(64, 32, stride=1, kernel_size=3),
+                conv(64, math.ceil(channels[-1]/num_slices) if i<num_slices-1 else channels[-1]-math.ceil(channels[-1]/num_slices)*(num_slices-1), stride=1, kernel_size=3),
             ) for i in range(num_slices)
         )
-        self.entropy_bottleneck = EntropyBottleneck(embed_dim * 4)
+        self.entropy_bottleneck = EntropyBottleneck(h_channels[-1])
         self.gaussian_conditional = GaussianConditional(None)
         self._freeze_stages()
 
@@ -604,9 +655,9 @@ class TransformerBasedCoding(CompressionModel):
 
     def forward(self, x):
         """Forward function."""
-        x = self.patch_embed(x)
+        # x = self.patch_embed(x)
 
-        Wh, Ww = x.size(2), x.size(3)
+        in_channel, Wh, Ww = x.size(1), x.size(2), x.size(3)
         x = x.flatten(2).transpose(1, 2)
         x = self.pos_drop(x)
         for i in range(self.num_layers):
@@ -614,18 +665,35 @@ class TransformerBasedCoding(CompressionModel):
             x, Wh, Ww = layer(x, Wh, Ww)
 
         y = x
-        C = self.embed_dim * 8
+        z = y
+
+        C = self.channels[-1]
         y = y.view(-1, Wh, Ww, C).permute(0, 3, 1, 2).contiguous()
         y_shape = y.shape[2:]
 
-        z = self.h_a(y)
+        for i in range(self.num_h_layers):
+            z, Wh, Ww = self.h_a[i](z, Wh, Ww)
+
+        C = self.h_channels[-1]
+        z = z.view(-1, Wh, Ww, C).permute(0, 3, 1, 2).contiguous()
         _, z_likelihoods = self.entropy_bottleneck(z)
         z_offset = self.entropy_bottleneck._get_medians()
         z_tmp = z - z_offset
         z_hat = ste_round(z_tmp) + z_offset
 
-        latent_scales = self.h_scale_s(z_hat)
-        latent_means = self.h_mean_s(z_hat)
+        latent_scales = z_hat.permute(0, 2, 3, 1).contiguous().view(-1, Wh*Ww, C)
+        Wh_, Ww_, C_ = Wh, Ww, C
+        for i in range(self.num_h_layers):
+            layer = self.h_scale_s[i]
+            latent_scales, Wh, Ww = layer(latent_scales, Wh, Ww)
+        C = self.channels[-1]
+        latent_scales = latent_scales.view(-1, Wh, Ww, C).permute(0, 3, 1, 2)
+
+        latent_means = z_hat.permute(0, 2, 3, 1).contiguous().view(-1, Wh_*Ww_, C_)
+        for i in range(self.num_h_layers):
+            layer = self.h_mean_s[i]
+            latent_means, Wh_, Ww_ = layer(latent_means, Wh_, Ww_)
+        latent_means = latent_means.view(-1, Wh_, Ww_, C).permute(0, 3, 1, 2)
 
         y_slices = y.chunk(self.num_slices, 1)
         y_hat_slices = []
@@ -661,7 +729,7 @@ class TransformerBasedCoding(CompressionModel):
             layer = self.syn_layers[i]
             y_hat, Wh, Ww = layer(y_hat, Wh, Ww)
 
-        x_hat = self.end_conv(y_hat.view(-1, Wh, Ww, self.embed_dim).permute(0, 3, 1, 2).contiguous())
+        x_hat = y_hat.view(-1, Wh, Ww, in_channel).permute(0, 3, 1, 2).contiguous()
         return {
             "x_hat": x_hat,
             "likelihoods": {"y": y_likelihoods, "z": z_likelihoods},
