@@ -40,7 +40,7 @@ class ImageFolder(Dataset):
     """
 
     def __init__(self, root, transform=None, split="train"):
-        splitdir = Path(root) / split / "data"
+        splitdir = Path(root) / split
 
         if not splitdir.is_dir():
             raise RuntimeError(f'Invalid directory "{root}"')
