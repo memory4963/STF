@@ -720,7 +720,7 @@ class TransformerBasedCoding(CompressionModel):
     @classmethod
     def from_state_dict(cls, state_dict):
         """Return a new model instance from `state_dict`."""
-        net = cls(num_slices=1)
+        net = cls()
         net.load_state_dict(state_dict)
         return net
 
