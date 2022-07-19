@@ -391,12 +391,11 @@ class TransformerBasedCoding(CompressionModel):
                  patch_size=2,
                  in_chans=3,
                  embed_dim=48,
-                 depths=[2, 2, 6, 2],
-                 h_depths=[5, 1],
+                 depths=[2,2,6,2],
+                 h_depths=[5,1],
                  num_heads=32,
                  h_num_heads=32,
-                 channels=[96,128,160,192],
-                 h_channels=[96, 128],
+                 channels=[96,128,160,192,96,128],
                  window_size=8,
                  h_window_size=4,
                  num_slices=10,
@@ -412,10 +411,13 @@ class TransformerBasedCoding(CompressionModel):
                  use_checkpoint=False):
         super().__init__()
 
+        m_channels = channels[:4]
+        h_channels = channels[4:]
+
         self.pretrain_img_size = pretrain_img_size
         self.num_layers = len(depths)
         self.num_h_layers = len(h_depths)
-        self.channels = channels
+        self.m_channels = m_channels
         self.h_channels = h_channels
         self.embed_dim = embed_dim
         self.patch_norm = patch_norm
@@ -432,13 +434,13 @@ class TransformerBasedCoding(CompressionModel):
         # stochastic depth
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, sum(depths))]  # stochastic depth decay rule
 
-        in_dims = [3] + channels[:-1]
+        in_dims = [3] + m_channels[:-1]
         # build layers
         self.layers = nn.ModuleList()
         for i_layer in range(self.num_layers):
             layer = BasicLayer(
                 dim=in_dims[i_layer],
-                odim=channels[i_layer],
+                odim=m_channels[i_layer],
                 depth=depths[i_layer],
                 num_heads=num_heads,
                 window_size=window_size,
@@ -457,7 +459,7 @@ class TransformerBasedCoding(CompressionModel):
         self.syn_layers = nn.ModuleList()
         for i_layer in range(self.num_layers):
             layer = BasicLayer(
-                dim=channels[::-1][i_layer],
+                dim=m_channels[::-1][i_layer],
                 odim=in_dims[::-1][i_layer],
                 depth=depths[::-1][i_layer],
                 num_heads=num_heads,
@@ -484,7 +486,7 @@ class TransformerBasedCoding(CompressionModel):
         self.g_a = None
         self.g_s = None
 
-        h_in_dims = channels[-1:] + h_channels[:-1]
+        h_in_dims = m_channels[-1:] + h_channels[:-1]
         self.h_a = nn.ModuleList()
         for i_layer in range(self.num_h_layers):
             layer = BasicLayer(
@@ -545,43 +547,9 @@ class TransformerBasedCoding(CompressionModel):
                 inverse=True)
             self.h_scale_s.append(layer)
 
-        # self.h_a = nn.Sequential(
-        #     conv3x3(384, 384),
-        #     nn.GELU(),
-        #     conv3x3(384, 336),
-        #     nn.GELU(),
-        #     conv3x3(336, 288, stride=2),
-        #     nn.GELU(),
-        #     conv3x3(288, 240),
-        #     nn.GELU(),
-        #     conv3x3(240, 192, stride=2),
-        # )
-
-        # self.h_mean_s = nn.Sequential(
-        #     conv3x3(192, 240),
-        #     nn.GELU(),
-        #     subpel_conv3x3(240, 288, 2),
-        #     nn.GELU(),
-        #     conv3x3(288, 336),
-        #     nn.GELU(),
-        #     subpel_conv3x3(336, 384, 2),
-        #     nn.GELU(),
-        #     conv3x3(384, 384),
-        # )
-        # self.h_scale_s = nn.Sequential(
-        #     conv3x3(192, 240),
-        #     nn.GELU(),
-        #     subpel_conv3x3(240, 288, 2),
-        #     nn.GELU(),
-        #     conv3x3(288, 336),
-        #     nn.GELU(),
-        #     subpel_conv3x3(336, 384, 2),
-        #     nn.GELU(),
-        #     conv3x3(384, 384),
-        # )
         self.cc_mean_transforms = nn.ModuleList(
             nn.Sequential(
-                conv(self.channels[-1] + math.ceil(channels[-1]/num_slices) * min(i, self.max_support_slices), 224, stride=1, kernel_size=3),
+                conv(self.m_channels[-1] + math.ceil(m_channels[-1]/num_slices) * min(i, self.max_support_slices), 224, stride=1, kernel_size=3),
                 nn.GELU(),
                 conv(224, 176, stride=1, kernel_size=3),
                 nn.GELU(),
@@ -589,12 +557,12 @@ class TransformerBasedCoding(CompressionModel):
                 nn.GELU(),
                 conv(128, 64, stride=1, kernel_size=3),
                 nn.GELU(),
-                conv(64, math.ceil(channels[-1]/num_slices) if i<num_slices-1 else channels[-1]-math.ceil(channels[-1]/num_slices)*(num_slices-1), stride=1, kernel_size=3),
+                conv(64, math.ceil(m_channels[-1]/num_slices) if i<num_slices-1 else m_channels[-1]-math.ceil(m_channels[-1]/num_slices)*(num_slices-1), stride=1, kernel_size=3),
             ) for i in range(num_slices)
         )
         self.cc_scale_transforms = nn.ModuleList(
             nn.Sequential(
-                conv(self.channels[-1] + math.ceil(channels[-1]/num_slices) * min(i, self.max_support_slices), 224, stride=1, kernel_size=3),
+                conv(self.m_channels[-1] + math.ceil(m_channels[-1]/num_slices) * min(i, self.max_support_slices), 224, stride=1, kernel_size=3),
                 nn.GELU(),
                 conv(224, 176, stride=1, kernel_size=3),
                 nn.GELU(),
@@ -602,12 +570,12 @@ class TransformerBasedCoding(CompressionModel):
                 nn.GELU(),
                 conv(128, 64, stride=1, kernel_size=3),
                 nn.GELU(),
-                conv(64, math.ceil(channels[-1]/num_slices) if i<num_slices-1 else channels[-1]-math.ceil(channels[-1]/num_slices)*(num_slices-1), stride=1, kernel_size=3),
+                conv(64, math.ceil(m_channels[-1]/num_slices) if i<num_slices-1 else m_channels[-1]-math.ceil(m_channels[-1]/num_slices)*(num_slices-1), stride=1, kernel_size=3),
             ) for i in range(num_slices)
         )
         self.lrp_transforms = nn.ModuleList(
             nn.Sequential(
-                conv(self.channels[-1] + math.ceil(self.channels[-1]/num_slices) * min(i + 1, self.max_support_slices+1) if i<num_slices-1 else self.channels[-1] + math.ceil(self.channels[-1]/num_slices) * min(i, self.max_support_slices) + channels[-1]-math.ceil(channels[-1]/num_slices)*(num_slices-1), 224, stride=1, kernel_size=3),
+                conv(self.m_channels[-1] + math.ceil(self.m_channels[-1]/num_slices) * min(i + 1, self.max_support_slices+1) if i<num_slices-1 else self.m_channels[-1] + math.ceil(self.m_channels[-1]/num_slices) * min(i, self.max_support_slices) + m_channels[-1]-math.ceil(m_channels[-1]/num_slices)*(num_slices-1), 224, stride=1, kernel_size=3),
                 nn.GELU(),
                 conv(224, 176, stride=1, kernel_size=3),
                 nn.GELU(),
@@ -615,7 +583,7 @@ class TransformerBasedCoding(CompressionModel):
                 nn.GELU(),
                 conv(128, 64, stride=1, kernel_size=3),
                 nn.GELU(),
-                conv(64, math.ceil(channels[-1]/num_slices) if i<num_slices-1 else channels[-1]-math.ceil(channels[-1]/num_slices)*(num_slices-1), stride=1, kernel_size=3),
+                conv(64, math.ceil(m_channels[-1]/num_slices) if i<num_slices-1 else m_channels[-1]-math.ceil(m_channels[-1]/num_slices)*(num_slices-1), stride=1, kernel_size=3),
             ) for i in range(num_slices)
         )
         self.entropy_bottleneck = EntropyBottleneck(h_channels[-1])
@@ -655,8 +623,6 @@ class TransformerBasedCoding(CompressionModel):
 
     def forward(self, x):
         """Forward function."""
-        # x = self.patch_embed(x)
-
         in_channel, Wh, Ww = x.size(1), x.size(2), x.size(3)
         x = x.flatten(2).transpose(1, 2)
         x = self.pos_drop(x)
@@ -667,7 +633,7 @@ class TransformerBasedCoding(CompressionModel):
         y = x
         z = y
 
-        C = self.channels[-1]
+        C = self.m_channels[-1]
         y = y.view(-1, Wh, Ww, C).permute(0, 3, 1, 2).contiguous()
         y_shape = y.shape[2:]
 
@@ -686,7 +652,7 @@ class TransformerBasedCoding(CompressionModel):
         for i in range(self.num_h_layers):
             layer = self.h_scale_s[i]
             latent_scales, Wh, Ww = layer(latent_scales, Wh, Ww)
-        C = self.channels[-1]
+        C = self.m_channels[-1]
         latent_scales = latent_scales.view(-1, Wh, Ww, C).permute(0, 3, 1, 2)
 
         latent_means = z_hat.permute(0, 2, 3, 1).contiguous().view(-1, Wh_*Ww_, C_)
@@ -754,30 +720,47 @@ class TransformerBasedCoding(CompressionModel):
     @classmethod
     def from_state_dict(cls, state_dict):
         """Return a new model instance from `state_dict`."""
-        net = cls()
+        net = cls(num_slices=1)
         net.load_state_dict(state_dict)
         return net
 
 
     def compress(self, x):
-        x = self.patch_embed(x)
-
         Wh, Ww = x.size(2), x.size(3)
         x = x.flatten(2).transpose(1, 2)
+        x = self.pos_drop(x)
         for i in range(self.num_layers):
             layer = self.layers[i]
             x, Wh, Ww = layer(x, Wh, Ww)
+
         y = x
-        C = self.embed_dim * 8
+        z = y
+
+        C = self.m_channels[-1]
         y = y.view(-1, Wh, Ww, C).permute(0, 3, 1, 2).contiguous()
         y_shape = y.shape[2:]
 
-        z = self.h_a(y)
+        for i in range(self.num_h_layers):
+            z, Wh, Ww = self.h_a[i](z, Wh, Ww)
+
+        C = self.h_channels[-1]
+        z = z.view(-1, Wh, Ww, C).permute(0, 3, 1, 2).contiguous()
         z_strings = self.entropy_bottleneck.compress(z)
         z_hat = self.entropy_bottleneck.decompress(z_strings, z.size()[-2:])
 
-        latent_scales = self.h_scale_s(z_hat)
-        latent_means = self.h_mean_s(z_hat)
+        latent_scales = z_hat.permute(0, 2, 3, 1).contiguous().view(-1, Wh*Ww, C)
+        Wh_, Ww_, C_ = Wh, Ww, C
+        for i in range(self.num_h_layers):
+            layer = self.h_scale_s[i]
+            latent_scales, Wh, Ww = layer(latent_scales, Wh, Ww)
+        C = self.m_channels[-1]
+        latent_scales = latent_scales.view(-1, Wh, Ww, C).permute(0, 3, 1, 2)
+
+        latent_means = z_hat.permute(0, 2, 3, 1).contiguous().view(-1, Wh_*Ww_, C_)
+        for i in range(self.num_h_layers):
+            layer = self.h_mean_s[i]
+            latent_means, Wh_, Ww_ = layer(latent_means, Wh_, Ww_)
+        latent_means = latent_means.view(-1, Wh_, Ww_, C).permute(0, 3, 1, 2)
 
         y_slices = y.chunk(self.num_slices, 1)
         y_hat_slices = []
@@ -825,12 +808,26 @@ class TransformerBasedCoding(CompressionModel):
     def decompress(self, strings, shape):
         assert isinstance(strings, list) and len(strings) == 2
         z_hat = self.entropy_bottleneck.decompress(strings[1], shape)
-        latent_scales = self.h_scale_s(z_hat)
-        latent_means = self.h_mean_s(z_hat)
+
+        C, Wh, Ww, = z_hat.size(1), z_hat.size(2), z_hat.size(3)
+        latent_scales = z_hat.permute(0, 2, 3, 1).contiguous().view(-1, Wh*Ww, C)
+        Wh_, Ww_, C_ = Wh, Ww, C
+        for i in range(self.num_h_layers):
+            layer = self.h_scale_s[i]
+            latent_scales, Wh, Ww = layer(latent_scales, Wh, Ww)
+        C = self.m_channels[-1]
+        latent_scales = latent_scales.view(-1, Wh, Ww, C).permute(0, 3, 1, 2)
+
+        latent_means = z_hat.permute(0, 2, 3, 1).contiguous().view(-1, Wh_*Ww_, C_)
+        for i in range(self.num_h_layers):
+            layer = self.h_mean_s[i]
+            latent_means, Wh_, Ww_ = layer(latent_means, Wh_, Ww_)
+        latent_means = latent_means.view(-1, Wh_, Ww_, C).permute(0, 3, 1, 2)
+
+        y_hat_slices = []
 
         y_shape = [z_hat.shape[2] * 4, z_hat.shape[3] * 4]
         Wh, Ww = y_shape
-        C = self.embed_dim * 8
 
         y_string = strings[0][0]
 
@@ -871,6 +868,7 @@ class TransformerBasedCoding(CompressionModel):
         for i in range(self.num_layers):
             layer = self.syn_layers[i]
             y_hat, Wh, Ww = layer(y_hat, Wh, Ww)
+        
+        x_hat = y_hat.view(-1, Wh, Ww, 3).permute(0, 3, 1, 2).contiguous()
 
-        x_hat = self.end_conv(y_hat.view(-1, Wh, Ww, self.embed_dim).permute(0, 3, 1, 2).contiguous()).clamp_(0, 1)
         return {"x_hat": x_hat}
