@@ -395,7 +395,7 @@ class TransformerBasedCoding(CompressionModel):
                  h_depths=[5,1],
                  num_heads=32,
                  h_num_heads=32,
-                 channels=[96,128,160,192,96,128],
+                 channels=[128,192,256,320,192,192],
                  window_size=8,
                  h_window_size=4,
                  num_slices=10,

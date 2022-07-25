@@ -156,6 +156,7 @@ def eval_model(model, filepaths, entropy_estimation=False, half=False, recon_pat
     device = next(model.parameters()).device
     metrics = defaultdict(float)
     for f in filepaths:
+        print(f)
         _filename = f.split("/")[-1]
 
         x = read_image(f).to(device)
