@@ -13,7 +13,7 @@
 # limitations under the License.
 
 
-from compressai.models import SymmetricalTransFormer, WACNN, TransformerBasedCoding
+from compressai.models import SymmetricalTransFormer, WACNN, TransformerBasedCoding, DYSTF
 
 from .pretrained import load_pretrained as load_state_dict
 
@@ -21,4 +21,5 @@ models = {
     'stf': SymmetricalTransFormer,
     'cnn': WACNN,
     'tbc': TransformerBasedCoding,
+    'dystf': DYSTF,
 }

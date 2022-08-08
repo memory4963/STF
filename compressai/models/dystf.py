@@ -610,12 +610,12 @@ class BasicLayer(nn.Module):
                 x = blk(x, attn_mask)
         else:
             for blk_idx, blk in enumerate(self.blocks):
+                blk.H, blk.W = H, W
                 if blk_idx in self.pruning_locs:
                     x, mask = self.score_predictor[pruning_loc](x, mask, self.sparse_ratio[pruning_loc])
                     pruning_loc += 1
                     decisions.append(mask)
                 if blk_idx < self.pruning_locs[0]:
-                    blk.H, blk.W = H, W
                     x = blk(x, attn_mask)
                 else:
                     x = blk(x, attn_mask, mask)
@@ -705,7 +705,9 @@ class DYSTF(CompressionModel):
                  norm_layer=nn.LayerNorm,
                  patch_norm=True,
                  frozen_stages=-1,
-                 use_checkpoint=False):
+                 use_checkpoint=False,
+                 sparse_ratio=[0.9,0.7,0.5],
+                 pruning_locs=[4,8,12]):
         super().__init__()
 
         self.pretrain_img_size = pretrain_img_size
@@ -715,6 +717,8 @@ class DYSTF(CompressionModel):
         self.frozen_stages = frozen_stages
         self.num_slices = num_slices
         self.max_support_slices = num_slices // 2
+        self.sparse_ratio = sparse_ratio
+        self.pruning_locs = pruning_locs
         # split image into non-overlapping patches
         self.patch_embed = PatchEmbed(
             patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim,
@@ -727,7 +731,18 @@ class DYSTF(CompressionModel):
 
         # build layers
         self.layers = nn.ModuleList()
+        block_cnt = 0
+        former_block_cnt = 0
+        cur_pruning_idx = 0
+        cur_pruning_locs = []
+        cur_sparse_ratio = []
         for i_layer in range(self.num_layers):
+            former_block_cnt = block_cnt
+            block_cnt += depths[i_layer]
+            while cur_pruning_idx < len(pruning_locs) and block_cnt >= pruning_locs[cur_pruning_idx]:
+                cur_pruning_locs.append(pruning_locs[cur_pruning_idx] - former_block_cnt - 1)
+                cur_sparse_ratio.append(sparse_ratio[cur_pruning_idx])
+                cur_pruning_idx += 1
             layer = BasicLayer(
                 dim=int(embed_dim * 2 ** i_layer),
                 depth=depths[i_layer],
@@ -742,7 +757,9 @@ class DYSTF(CompressionModel):
                 norm_layer=norm_layer,
                 downsample=PatchMerging if (i_layer < self.num_layers - 1) else None,
                 use_checkpoint=use_checkpoint,
-                inverse=False)
+                inverse=False,
+                sparse_ratio=cur_sparse_ratio if len(cur_sparse_ratio) else None,
+                pruning_loc=cur_pruning_locs if len(cur_pruning_locs) else None)
             self.layers.append(layer)
 
         depths = depths[::-1]
@@ -944,15 +961,16 @@ class DYSTF(CompressionModel):
         for i in range(self.num_layers):
             layer = self.syn_layers[i]
             y_hat, Wh, Ww, decisions = layer(y_hat, Wh, Ww)
-            if len(decisions) > 0:
-                syn_final_decisions = decisions
+            # if len(decisions) > 0:
+            #     syn_final_decisions = decisions
 
         x_hat = self.end_conv(y_hat.view(-1, Wh, Ww, self.embed_dim).permute(0, 3, 1, 2).contiguous())
         return {
             "x_hat": x_hat,
             "likelihoods": {"y": y_likelihoods, "z": z_likelihoods},
             "decisions": final_decisions,
-            "syn_decisions": syn_final_decisions
+            "y": y if self.training else None,
+            # "syn_decisions": syn_final_decisions
         }
 
     def update(self, scale_table=None, force=False):

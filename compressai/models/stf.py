@@ -400,7 +400,8 @@ class SymmetricalTransFormer(CompressionModel):
                  norm_layer=nn.LayerNorm,
                  patch_norm=True,
                  frozen_stages=-1,
-                 use_checkpoint=False):
+                 use_checkpoint=False,
+                 is_teacher=False):
         super().__init__()
 
         self.pretrain_img_size = pretrain_img_size
@@ -410,6 +411,7 @@ class SymmetricalTransFormer(CompressionModel):
         self.frozen_stages = frozen_stages
         self.num_slices = num_slices
         self.max_support_slices = num_slices // 2
+        self.is_teacher = is_teacher
         # split image into non-overlapping patches
         self.patch_embed = PatchEmbed(
             patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim,
@@ -642,6 +644,7 @@ class SymmetricalTransFormer(CompressionModel):
         return {
             "x_hat": x_hat,
             "likelihoods": {"y": y_likelihoods, "z": z_likelihoods},
+            "y": y if self.is_teacher else None
         }
 
     def update(self, scale_table=None, force=False):
