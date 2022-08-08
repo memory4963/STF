@@ -3,7 +3,7 @@ import math
 import torch.nn.functional as F
 import numpy as np
 from timm.models.layers import DropPath, to_2tuple, trunc_normal_
-from .utils import conv, update_registered_buffers, deconv
+from .utils import conv, update_registered_buffers, deconv, batch_index_select, batch_index_fill
 
 import torch.nn as nn
 from compressai.entropy_models import EntropyBottleneck, GaussianConditional
@@ -36,6 +36,22 @@ class Mlp(nn.Module):
         x = self.act(x)
         x = self.drop(x)
         x = self.fc2(x)
+        x = self.drop(x)
+        return x
+
+class fastMlp(nn.Module):
+    def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, drop=0.):
+        super().__init__()
+        out_features = out_features or in_features
+        hidden_features = hidden_features or in_features
+        self.fc1 = nn.Sequential(
+                nn.LayerNorm(in_features),
+                nn.Linear(in_features, in_features)
+            )
+        self.drop = nn.Dropout(drop)
+
+    def forward(self, x):
+        x = self.fc1(x)
         x = self.drop(x)
         return x
 
@@ -120,6 +136,68 @@ class WindowAttention(nn.Module):
         x = self.proj_drop(x)
         return x
 
+    def extra_repr(self) -> str:
+        return f'dim={self.dim}, window_size={self.window_size}, num_heads={self.num_heads}'
+
+    def flops(self, N):
+        # calculate flops for 1 window with token length of N
+        flops = 0
+        # qkv = self.qkv(x)
+        flops += N * self.dim * 3 * self.dim
+        # attn = (q @ k.transpose(-2, -1))
+        flops += self.num_heads * N * (self.dim // self.num_heads) * N
+        #  x = (attn @ v)
+        flops += self.num_heads * N * N * (self.dim // self.num_heads)
+        # x = self.proj(x)
+        flops += N * self.dim * self.dim
+        return flops
+
+class PredictorLG(nn.Module):
+    """ Importance Score Predictor
+    """
+    def __init__(self, embed_dim=384):
+        super().__init__()
+        self.in_conv = nn.Sequential(
+            nn.LayerNorm(embed_dim),
+            nn.Linear(embed_dim, embed_dim),
+            nn.GELU()
+        )
+
+        self.out_conv = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim // 2),
+            nn.GELU(),
+            nn.Linear(embed_dim // 2, embed_dim // 4),
+            nn.GELU(),
+            nn.Linear(embed_dim // 4, 2),
+            nn.LogSoftmax(dim=-1)
+        )
+
+    def forward(self, input_x, mask=None, ratio=0.5):
+        if self.training and mask is not None:
+            x1, x2 = input_x
+            input_x = x1 * mask + x2 * (1 - mask) # x2一直是原本的x，而x1是当前已经被mask过的
+        else:
+            x1 = input_x
+            x2 = input_x
+            
+        x = self.in_conv(input_x)
+        B, N, C = x.size()
+        local_x = x[:, :, :C//2]
+        global_x = torch.mean(x[:, :, C//2:], keepdim=True, dim=(1))
+        x = torch.cat([local_x, global_x.expand(B, N, C//2)], dim=2)
+        pred_score = self.out_conv(x)
+
+        if self.training:
+            mask = F.gumbel_softmax(pred_score, hard=True, dim=2)[:, :, 0:1]
+            return [x1, x2], mask
+        else:
+            score = pred_score[:, : , 0]
+            B, N = score.shape
+            num_keep_node = int(N * ratio)
+            idx = torch.argsort(score, dim=1, descending=True)
+            idx1 = idx[:, :num_keep_node]
+            idx2 = idx[:, num_keep_node:]
+            return input_x, [idx1, idx2]
 
 class SwinTransformerBlock(nn.Module):
     def __init__(self, dim, num_heads, window_size=7, shift_size=0,
@@ -149,6 +227,7 @@ class SwinTransformerBlock(nn.Module):
     def forward(self, x, mask_matrix):
         B, L, C = x.shape
         H, W = self.H, self.W
+        self.input_resolution = H, W
         assert L == H * W, "input feature has wrong size"
 
         shortcut = x
@@ -198,6 +277,144 @@ class SwinTransformerBlock(nn.Module):
 
         return x
 
+    def extra_repr(self) -> str:
+    
+        return f"dim={self.dim}, input_resolution={self.input_resolution}, num_heads={self.num_heads}, " \
+               f"window_size={self.window_size}, shift_size={self.shift_size}, mlp_ratio={self.mlp_ratio}"
+
+    def flops(self):
+        flops = 0
+        H, W = self.input_resolution
+        # norm1
+        flops += self.dim * H * W
+        # W-MSA/SW-MSA
+        nW = H * W / self.window_size / self.window_size
+        flops += nW * self.attn.flops(self.window_size * self.window_size)
+        # mlp
+        flops += 2 * H * W * self.dim * self.dim * self.mlp_ratio
+        # norm2
+        flops += self.dim * H * W
+        return flops
+
+class AdaSwinTransformerBlock(nn.Module):
+    def __init__(self, dim, num_heads, window_size=7, shift_size=0,
+                 mlp_ratio=4., qkv_bias=True, qk_scale=None, drop=0., attn_drop=0., drop_path=0.,
+                 act_layer=nn.GELU, norm_layer=nn.LayerNorm, inverse=False):
+        super().__init__()
+        self.dim = dim
+        self.num_heads = num_heads
+        self.window_size = window_size
+        self.shift_size = shift_size
+        self.mlp_ratio = mlp_ratio
+        assert 0 <= self.shift_size < self.window_size, "shift_size must in 0-window_size"
+
+        self.norm1 = norm_layer(dim)
+        self.attn = WindowAttention(
+            dim, window_size=to_2tuple(self.window_size), num_heads=num_heads,
+            qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop)
+
+        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+        self.norm2 = norm_layer(dim)
+        mlp_hidden_dim = int(dim * mlp_ratio)
+        self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
+
+        self.fastmlp = fastMlp(in_features=dim, act_layer=act_layer, drop=drop)
+
+        self.H = None
+        self.W = None
+
+    def forward(self, x, mask_matrix, mask=None):
+        if mask is not None and self.training:
+            x1, x2 = x
+            x = x1 * mask + x2 * (1 - mask) # x2一直是原本的x，而x1是当前已经被mask过的
+
+        B, L, C = x.shape
+        H, W = self.H, self.W
+        self.input_resolution = H, W
+        assert L == H * W, "input feature has wrong size"
+
+        shortcut = x
+        x = self.norm1(x)
+        x = x.view(B, H, W, C)
+
+        # pad feature maps to multiples of window size
+        pad_l = pad_t = 0
+        pad_r = (self.window_size - W % self.window_size) % self.window_size
+        pad_b = (self.window_size - H % self.window_size) % self.window_size
+        x = F.pad(x, (0, 0, pad_l, pad_r, pad_t, pad_b))
+        _, Hp, Wp, _ = x.shape
+
+        # cyclic shift
+        if self.shift_size > 0:
+            shifted_x = torch.roll(x, shifts=(-self.shift_size, -self.shift_size), dims=(1, 2))
+            attn_mask = mask_matrix
+        else:
+            shifted_x = x
+            attn_mask = None
+
+        # partition windows
+        x_windows = window_partition(shifted_x, self.window_size)  # nW*B, window_size, window_size, C
+        x_windows = x_windows.view(-1, self.window_size * self.window_size, C)  # nW*B, window_size*window_size, C
+
+        # W-MSA/SW-MSA
+        attn_windows = self.attn(x_windows, mask=attn_mask)  # nW*B, window_size*window_size, C
+
+        # merge windows
+        attn_windows = attn_windows.view(-1, self.window_size, self.window_size, C)
+        shifted_x = window_reverse(attn_windows, self.window_size, Hp, Wp)  # B H' W' C
+
+        # reverse cyclic shift
+        if self.shift_size > 0:
+            x = torch.roll(shifted_x, shifts=(self.shift_size, self.shift_size), dims=(1, 2))
+        else:
+            x = shifted_x
+
+        if pad_r > 0 or pad_b > 0:
+            x = x[:, :H, :W, :].contiguous()
+
+        x = x.view(B, H * W, C)
+
+        # FFN
+        x = shortcut + self.drop_path(x)
+
+        if mask is None:
+            x = x + self.drop_path(self.mlp(self.norm2(x)))
+            return x
+        else:
+            if self.training:
+                x1 = x * mask + x1 * (1 - mask)
+                x2 = x * (1 - mask) + x2 * mask
+                x1 = x + self.drop_path(self.mlp(self.norm2(x1)))
+                x2 = x + self.drop_path(self.fastmlp(x2))
+                return [x1, x2]
+            else:
+                idx1, idx2 = mask
+
+                x1 = batch_index_select(x, idx1)
+                x2 = batch_index_select(x, idx2)
+                x1 = self.drop_path(self.mlp(self.norm2(x1)))
+                x2 = self.drop_path(self.fastmlp(x2))
+                x0 = torch.zeros_like(x)
+                x = x + batch_index_fill(x0, x1, x2, idx1, idx2)
+                return x
+
+    def extra_repr(self) -> str:
+        return f"dim={self.dim}, input_resolution={self.input_resolution}, num_heads={self.num_heads}, " \
+               f"window_size={self.window_size}, shift_size={self.shift_size}, mlp_ratio={self.mlp_ratio}"
+
+    def flops(self):
+        flops = 0
+        H, W = self.input_resolution
+        # norm1
+        flops += self.dim * H * W
+        # W-MSA/SW-MSA
+        nW = H * W / self.window_size / self.window_size
+        flops += nW * self.attn.flops(self.window_size * self.window_size)
+        # mlp
+        flops += 2 * H * W * self.dim * self.dim * self.mlp_ratio
+        # norm2
+        flops += self.dim * H * W
+        return flops
 
 class PatchMerging(nn.Module):
     def __init__(self, dim, norm_layer=nn.LayerNorm):
@@ -212,6 +429,7 @@ class PatchMerging(nn.Module):
             x: Input feature, tensor size (B, H*W, C).
             H, W: Spatial resolution of the input feature.
         """
+        self.input_resolution = H, W
         B, L, C = x.shape
         assert L == H * W, "input feature has wrong size"
 
@@ -234,6 +452,14 @@ class PatchMerging(nn.Module):
 
         return x
 
+    def extra_repr(self) -> str:
+        return f"input_resolution={self.input_resolution}, dim={self.dim}"
+
+    def flops(self):
+        H, W = self.input_resolution
+        flops = H * W * self.dim
+        flops += (H // 2) * (W // 2) * 4 * self.dim * 2 * self.dim
+        return flops
 
 class PatchSplit(nn.Module):
     """ Patch Merging Layer
@@ -274,17 +500,21 @@ class BasicLayer(nn.Module):
                  norm_layer=nn.LayerNorm,
                  downsample=None,
                  use_checkpoint=False,
-                 inverse=False):
+                 inverse=False,
+                 sparse_ratio=None,
+                 pruning_loc=None):
+
         super().__init__()
+        self.dim = dim
         self.window_size = window_size
         self.shift_size = window_size // 2
         self.depth = depth
         self.use_checkpoint = use_checkpoint
 
         # build blocks
-        self.blocks = nn.ModuleList([
+        if sparse_ratio is None:
+            self.blocks = nn.ModuleList([
             SwinTransformerBlock(
-
                 dim=dim,
                 num_heads=num_heads,
                 window_size=window_size,
@@ -298,6 +528,37 @@ class BasicLayer(nn.Module):
                 norm_layer=norm_layer,
                 inverse=inverse)
             for i in range(depth)])
+        else:
+            self.blocks = nn.Sequential(
+                *[SwinTransformerBlock(
+                    dim=dim,
+                    num_heads=num_heads,
+                    window_size=window_size,
+                    shift_size=0 if (i % 2 == 0) else window_size // 2,
+                    mlp_ratio=mlp_ratio,
+                    qkv_bias=qkv_bias,
+                    qk_scale=qk_scale,
+                    drop=drop,
+                    attn_drop=attn_drop,
+                    drop_path=drop_path[i] if isinstance(drop_path, list) else drop_path,
+                    norm_layer=norm_layer,
+                    inverse=inverse)
+                for i in range(pruning_loc[0])],
+                *[AdaSwinTransformerBlock(
+                    dim=dim,
+                    num_heads=num_heads,
+                    window_size=window_size,
+                    shift_size=0 if (i % 2 == 0) else window_size // 2,
+                    mlp_ratio=mlp_ratio,
+                    qkv_bias=qkv_bias,
+                    qk_scale=qk_scale,
+                    drop=drop,
+                    attn_drop=attn_drop,
+                    drop_path=drop_path[i] if isinstance(drop_path, list) else drop_path,
+                    norm_layer=norm_layer,
+                    inverse=inverse)
+                for i in range(pruning_loc[0], depth)]
+                )
 
         # patch merging layer
         if downsample is not None:
@@ -305,13 +566,19 @@ class BasicLayer(nn.Module):
         else:
             self.downsample = None
 
+        self.sparse_ratio = sparse_ratio
+        self.pruning_locs = pruning_loc
+        if sparse_ratio is not None:
+            predictor_list = [PredictorLG(dim) for i in range(len(pruning_loc))]
+            self.score_predictor = nn.ModuleList(predictor_list)
+
     def forward(self, x, H, W):
         """ Forward function.
         Args:
             x: Input feature, tensor size (B, H*W, C).
             H, W: Spatial resolution of the input feature.
         """
-
+        self.input_resolution = H, W
         # calculate attention mask for SW-MSA
         Hp = int(np.ceil(H / self.window_size)) * self.window_size
         Wp = int(np.ceil(W / self.window_size)) * self.window_size
@@ -333,18 +600,48 @@ class BasicLayer(nn.Module):
         attn_mask = mask_windows.unsqueeze(1) - mask_windows.unsqueeze(2)
         attn_mask = attn_mask.masked_fill(attn_mask != 0, float(-100.0)).masked_fill(attn_mask == 0, float(0.0))
 
-        for blk in self.blocks:
-            blk.H, blk.W = H, W
-            x = blk(x, attn_mask)
-        if self.downsample is not None:
-            x_down = self.downsample(x, H, W)
-            if isinstance(self.downsample, PatchMerging):
-                Wh, Ww = (H + 1) // 2, (W + 1) // 2
-            elif isinstance(self.downsample, PatchSplit):
-                Wh, Ww = H * 2, W * 2
-            return x_down, Wh, Ww
+        pruning_loc = 0
+        mask = None
+        decisions = []
+
+        if self.sparse_ratio is None:
+            for blk in self.blocks:
+                blk.H, blk.W = H, W
+                x = blk(x, attn_mask)
         else:
-            return x, H, W
+            for blk_idx, blk in enumerate(self.blocks):
+                if blk_idx in self.pruning_locs:
+                    x, mask = self.score_predictor[pruning_loc](x, mask, self.sparse_ratio[pruning_loc])
+                    pruning_loc += 1
+                    decisions.append(mask)
+                if blk_idx < self.pruning_locs[0]:
+                    blk.H, blk.W = H, W
+                    x = blk(x, attn_mask)
+                else:
+                    x = blk(x, attn_mask, mask)
+
+            if len(x) == 2:
+                x = x[0] * mask + x[1] * (1 - mask)
+
+        if self.downsample is not None:
+            x = self.downsample(x, H, W)
+            if isinstance(self.downsample, PatchMerging):
+                H, W = (H + 1) // 2, (W + 1) // 2
+            elif isinstance(self.downsample, PatchSplit):
+                H, W = H * 2, W * 2
+
+        return x, H, W, decisions
+
+    def extra_repr(self) -> str:
+        return f"dim={self.dim}, input_resolution={self.input_resolution}, depth={self.depth}"
+
+    def flops(self):
+        flops = 0
+        for blk in self.blocks:
+            flops += blk.flops()
+        if self.downsample is not None:
+            flops += self.downsample.flops()
+        return flops
 
 
 class PatchEmbed(nn.Module):
@@ -371,17 +668,25 @@ class PatchEmbed(nn.Module):
         if H % self.patch_size[0] != 0:
             x = F.pad(x, (0, 0, 0, self.patch_size[0] - H % self.patch_size[0]))
 
+        self.patches_resolution = x.size(2) // self.patch_size[0], x.size(3) // self.patch_size[1]
+
         x = self.proj(x)  # B C Wh Ww
         if self.norm is not None:
             Wh, Ww = x.size(2), x.size(3)
             x = x.flatten(2).transpose(1, 2)
             x = self.norm(x)
             x = x.transpose(1, 2).view(-1, self.embed_dim, Wh, Ww)
-
         return x
 
+    def flops(self):
+        Ho, Wo = self.patches_resolution
+        flops = Ho * Wo * self.embed_dim * self.in_chans * (self.patch_size[0] * self.patch_size[1])
+        if self.norm is not None:
+            flops += Ho * Wo * self.embed_dim
+        return flops
 
-class SymmetricalTransFormer(CompressionModel):
+
+class DYSTF(CompressionModel):
     def __init__(self,
                  pretrain_img_size=256,
                  patch_size=2,
@@ -588,7 +893,9 @@ class SymmetricalTransFormer(CompressionModel):
         x = self.pos_drop(x)
         for i in range(self.num_layers):
             layer = self.layers[i]
-            x, Wh, Ww = layer(x, Wh, Ww)
+            x, Wh, Ww, decisions = layer(x, Wh, Ww)
+            if len(decisions) > 0:
+                final_decisions = decisions
 
         y = x
         C = self.embed_dim * 8
@@ -636,12 +943,16 @@ class SymmetricalTransFormer(CompressionModel):
         y_hat = y_hat.permute(0, 2, 3, 1).contiguous().view(-1, Wh*Ww, C)
         for i in range(self.num_layers):
             layer = self.syn_layers[i]
-            y_hat, Wh, Ww = layer(y_hat, Wh, Ww)
+            y_hat, Wh, Ww, decisions = layer(y_hat, Wh, Ww)
+            if len(decisions) > 0:
+                syn_final_decisions = decisions
 
         x_hat = self.end_conv(y_hat.view(-1, Wh, Ww, self.embed_dim).permute(0, 3, 1, 2).contiguous())
         return {
             "x_hat": x_hat,
             "likelihoods": {"y": y_likelihoods, "z": z_likelihoods},
+            "decisions": final_decisions,
+            "syn_decisions": syn_final_decisions
         }
 
     def update(self, scale_table=None, force=False):
