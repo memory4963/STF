@@ -439,7 +439,8 @@ def main(argv):
             args.clip_max_norm,
         )
         loss = test_epoch(epoch, test_dataloader, net, criterion)
-        lr_scheduler.step(loss)
+
+        lr_scheduler.step()
 
         is_best = loss < best_loss
         best_loss = min(loss, best_loss)

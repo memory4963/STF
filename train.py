@@ -12,21 +12,28 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 import argparse
 import math
 import random
 import shutil
 import sys
+from time import time
+
+import numpy as np
 
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import torch.distributed as dist
 
 from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
 from torchvision import transforms
 
 from compressai.datasets import ImageFolder
 from compressai.zoo import models
+import compressai.utils as utils
 
 
 class RateDistortionLoss(nn.Module):
@@ -113,10 +120,13 @@ def configure_optimizers(net, args):
 
 
 def train_one_epoch(
-    model, criterion, train_dataloader, optimizer, aux_optimizer, epoch, clip_max_norm
+    model, criterion, train_dataloader, optimizer, aux_optimizer, epoch, args
 ):
+    clip_max_norm = args.clip_max_norm
     model.train()
     device = next(model.parameters()).device
+    start_time = time()
+    pre_step = -1
 
     for i, d in enumerate(train_dataloader):
         d = d.to(device)
@@ -132,19 +142,27 @@ def train_one_epoch(
             torch.nn.utils.clip_grad_norm_(model.parameters(), clip_max_norm)
         optimizer.step()
 
-        aux_loss = model.aux_loss()
+        if args.distributed:
+            aux_loss = model.module.aux_loss()
+        else:
+            aux_loss = model.aux_loss()
         aux_loss.backward()
         aux_optimizer.step()
 
-        if i % 100 == 0:
+        if i % 10 == 0 and utils.is_main_process():
+            now_time = time()
+            left_time = int((now_time-start_time)/(i-pre_step)*(len(train_dataloader)-i))
+            start_time = now_time
+            pre_step = i
             print(
-                f"Train epoch {epoch}: ["
-                f"{i*len(d)}/{len(train_dataloader.dataset)}"
-                f" ({100. * i / len(train_dataloader):.0f}%)]"
+                f'Train epoch {epoch}: ['
+                f'{i*len(d)}/{len(train_dataloader.dataset)}'
+                f' ({100. * i / len(train_dataloader):.0f}%)]'
                 f'\tLoss: {out_criterion["loss"].item():.3f} |'
                 f'\tMSE loss: {out_criterion["mse_loss"].item() * 255 ** 2 / 3:.3f} |'
                 f'\tBpp loss: {out_criterion["bpp_loss"].item():.2f} |'
-                f"\tAux loss: {aux_loss.item():.2f}"
+                f'\tAux loss: {aux_loss.item():.2f}'
+                f'\tETA: {left_time//3600}:{(left_time%3600)//60}:{left_time%60}'
             )
 
 
@@ -179,6 +197,8 @@ def test_epoch(epoch, test_dataloader, model, criterion):
 
 
 def save_checkpoint(state, is_best, filename):
+    if not os.path.exists(os.path.dirname(filename)):
+        os.makedirs(os.path.dirname(filename))
     torch.save(state, filename)
     if is_best:
         shutil.copyfile(filename, filename[:-8]+"_best"+filename[-8:])
@@ -254,7 +274,7 @@ def parse_args(argv):
         "--save_path", type=str, default="ckpt/model.pth.tar", help="Where to Save model"
     )
     parser.add_argument(
-        "--seed", type=float, help="Set random seed for reproducibility"
+        "--seed", type=int, default=42, help="Set random seed for reproducibility"
     )
     parser.add_argument(
         "--clip_max_norm",
@@ -263,16 +283,29 @@ def parse_args(argv):
         help="gradient clipping max norm (default: %(default)s",
     )
     parser.add_argument("--checkpoint", type=str, help="Path to a checkpoint")
+    parser.add_argument('--world_size', default=1, type=int, help='number of distributed processes')
+    parser.add_argument( "--local_rank", default=0, type=int)
+    parser.add_argument('--dist_url', default='env://', help='url used to set up distributed training')
+    parser.add_argument('--distributed', action='store_false')
     args = parser.parse_args(argv)
     return args
 
 
 def main(argv):
     args = parse_args(argv)
-    print(args)
+    utils.init_distributed_mode(args)
+
     if args.seed is not None:
-        torch.manual_seed(args.seed)
-        random.seed(args.seed)
+        # seed = args.seed + utils.get_rank()
+        seed = args.seed
+        torch.manual_seed(seed)
+        np.random.seed(seed)
+        random.seed(seed)
+    if utils.is_main_process():
+        print(args)
+
+    world_size = utils.get_world_size()
+    global_rank = utils.get_rank()
 
     train_transforms = transforms.Compose(
         [transforms.RandomCrop(args.patch_size), transforms.ToTensor()]
@@ -287,35 +320,57 @@ def main(argv):
 
     device = "cuda" if args.cuda and torch.cuda.is_available() else "cpu"
 
-    train_dataloader = DataLoader(
-        train_dataset,
-        batch_size=args.batch_size,
-        num_workers=args.num_workers,
-        shuffle=True,
-        pin_memory=(device == "cuda"),
-    )
+    if args.distributed:
+        train_sampler = DistributedSampler(train_dataset, shuffle=True, num_replicas=world_size, rank=global_rank)
+        train_dataloader = DataLoader(
+            train_dataset,
+            batch_size=args.batch_size,
+            num_workers=args.num_workers,
+            sampler=train_sampler,
+            pin_memory=(device == "cuda"),
+        )
 
-    test_dataloader = DataLoader(
-        test_dataset,
-        batch_size=args.test_batch_size,
-        num_workers=args.num_workers,
-        shuffle=False,
-        pin_memory=(device == "cuda"),
-    )
+        # test不用分布式
+        test_dataloader = DataLoader(
+            test_dataset,
+            batch_size=args.test_batch_size,
+            num_workers=args.num_workers,
+            shuffle=False,
+            pin_memory=(device == "cuda"),
+        )
+    else:
+        train_dataloader = DataLoader(
+            train_dataset,
+            batch_size=args.batch_size,
+            num_workers=args.num_workers,
+            shuffle=True,
+            pin_memory=(device == "cuda"),
+        )
+
+        test_dataloader = DataLoader(
+            test_dataset,
+            batch_size=args.test_batch_size,
+            num_workers=args.num_workers,
+            shuffle=False,
+            pin_memory=(device == "cuda"),
+        )
 
     net = models[args.model]()
     net = net.to(device)
 
-    if args.cuda and torch.cuda.device_count() > 1:
-        net = CustomDataParallel(net)
+    net_without_ddp = net
+    if args.distributed:
+        net = torch.nn.parallel.DistributedDataParallel(net, device_ids=[args.gpu])
+        net_without_ddp = net.module
 
     optimizer, aux_optimizer = configure_optimizers(net, args)
-    lr_scheduler = optim.lr_scheduler.MultiStepLR(optimizer, [500, 700, 900])
+    lr_scheduler = optim.lr_scheduler.MultiStepLR(optimizer, [320, 345])
     criterion = RateDistortionLoss(lmbda=args.lmbda)
 
     last_epoch = 0
     if args.checkpoint:  # load from previous checkpoint
-        print("Loading", args.checkpoint)
+        if utils.is_main_process():
+            print("Loading", args.checkpoint)
         checkpoint = torch.load(args.checkpoint, map_location=device)
         last_epoch = checkpoint["epoch"] + 1
         net.load_state_dict(checkpoint["state_dict"])
@@ -326,7 +381,8 @@ def main(argv):
 
     best_loss = float("inf")
     for epoch in range(last_epoch, args.epochs):
-        print(f"Learning rate: {optimizer.param_groups[0]['lr']}")
+        if utils.is_main_process():
+            print(f"Learning rate: {optimizer.param_groups[0]['lr']}")
         train_one_epoch(
             net,
             criterion,
@@ -334,27 +390,31 @@ def main(argv):
             optimizer,
             aux_optimizer,
             epoch,
-            args.clip_max_norm,
+            args
         )
-        loss = test_epoch(epoch, test_dataloader, net, criterion)
-        lr_scheduler.step(loss)
+        lr_scheduler.step()
 
-        is_best = loss < best_loss
-        best_loss = min(loss, best_loss)
+        if utils.is_main_process():
+            loss = test_epoch(epoch, test_dataloader, net, criterion)
 
-        if args.save:
-            save_checkpoint(
-                {
-                    "epoch": epoch,
-                    "state_dict": net.state_dict(),
-                    "loss": loss,
-                    "optimizer": optimizer.state_dict(),
-                    "aux_optimizer": aux_optimizer.state_dict(),
-                    "lr_scheduler": lr_scheduler.state_dict(),
-                },
-                is_best,
-                args.save_path,
-            )
+            is_best = loss < best_loss
+            best_loss = min(loss, best_loss)
+
+            if args.save:
+                save_checkpoint(
+                    {
+                        "epoch": epoch,
+                        "state_dict": net.state_dict(),
+                        "loss": loss,
+                        "optimizer": optimizer.state_dict(),
+                        "aux_optimizer": aux_optimizer.state_dict(),
+                        "lr_scheduler": lr_scheduler.state_dict(),
+                    },
+                    is_best,
+                    args.save_path,
+                )
+        if args.distributed:
+            dist.barrier()
 
 
 if __name__ == "__main__":
