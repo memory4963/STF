@@ -20,13 +20,14 @@ def get_scale_table(min=SCALES_MIN, max=SCALES_MAX, levels=SCALES_LEVELS):
     return torch.exp(torch.linspace(math.log(min), math.log(max), levels))
 
 
-class CC(CompressionModel):
+class CCGD(CompressionModel):
     """Channel-wise Context model"""
 
-    def __init__(self, N=192, M=320, **kwargs):
+    def __init__(self, N=192, M=320, sparse_lambda=0.5, **kwargs):
         super().__init__(**kwargs)
         self.num_slices = 10
         self.max_support_slices = 5
+        self.sparse_lambda = sparse_lambda
 
         self.g_a = nn.Sequential(
             conv(3, N),
@@ -329,5 +330,25 @@ class CC(CompressionModel):
         return {"x_hat": x_hat}
 
 
+class GateDecorator(nn.Module):
+    def __init__(self, channel_size, minimal=0.04):
+        super(GateDecorator, self).__init__()
+        self.channel_size = channel_size
+        self.minimal = int(minimal*channel_size)
+        self.gate = nn.Parameter(torch.ones(1, self.channel_size, 1, 1), requires_grad=True)
 
+        self.register_buffer('score', torch.zeros(1, self.channel_size, 1, 1))
+        self.register_buffer('mask', torch.ones(1, self.channel_size, 1, 1))
+        # self.mask[:, 0] -= 1.1
+    
+    def cal_score(self):
+        self.score += (self.gate.grad * self.gate).abs()
+    
+    def get_score(self):
+        return self.score.view(-1)
 
+    def reset_score(self):
+        self.score.zero_()
+
+    def forward(self, x):
+        return x * self.gate * self.mask

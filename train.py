@@ -395,7 +395,7 @@ def main(argv):
         lr_scheduler.step()
 
         if utils.is_main_process():
-            loss = test_epoch(epoch, test_dataloader, net, criterion)
+            loss = test_epoch(epoch, test_dataloader, net_without_ddp, criterion)
 
             is_best = loss < best_loss
             best_loss = min(loss, best_loss)
