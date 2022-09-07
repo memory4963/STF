@@ -34,12 +34,10 @@ from compressai.zoo import models
 class RateDistortionLoss(nn.Module):
     """Custom rate distortion loss with a Lagrangian parameter."""
 
-    def __init__(self, lmbda=1e-2, lpips=False, yuv=False):
+    def __init__(self, lmbda=1e-2):
         super().__init__()
         self.mse = nn.MSELoss()
         self.lmbda = lmbda
-        self.lpips = lpips
-        self.yuv = yuv
         self.uv_ratio = 0.5
 
     def forward(self, output, target):
@@ -374,7 +372,7 @@ def parse_args(argv):
         help="gradient clipping max norm (default: %(default)s",
     )
     parser.add_argument("--checkpoint", type=str, help="Path to a checkpoint")
-    parser.add_argument("--pretrained", action="store_true", default=False, help="Whether use pretrained")
+    parser.add_argument("--pretrained", type=str, help="Path to a pretrained")
     parser.add_argument(
         "--tick_round",
         type=int,
@@ -389,31 +387,6 @@ def parse_args(argv):
     )
     args = parser.parse_args(argv)
     return args
-
-
-def get_con_flops(input_deps, output_deps, h, w=None, kernel_size=3, groups=1):
-    if w is None:
-        w = h
-    rtn = input_deps * output_deps * h * w * kernel_size * kernel_size // groups
-    return rtn.data.cpu().numpy()
-
-
-def calculate_cai_bmshj_main_flops(deps):
-    result = []
-    result.append(get_con_flops(3, deps[0], 128, 128, 5))
-    result.append(get_con_flops(deps[0], deps[1], 64, 64, 5))
-    result.append(get_con_flops(deps[1], deps[2], 32, 32, 5))
-    result.append(get_con_flops(deps[2], deps[3], 16, 16, 5))
-    result.append(get_con_flops(deps[3], deps[4], 32, 32, 5))
-    result.append(get_con_flops(deps[4], deps[5], 64, 64, 5))
-    result.append(get_con_flops(deps[5], deps[6], 128, 128, 5))
-    result.append(get_con_flops(deps[6], 3, 256, 25, 5))
-    return np.sum(result)
-
-
-def cal_deps(net):
-    return [sum((net.g_a[1].mask > 0.).view(-1)), sum((net.g_a[4].mask > 0.).view(-1)), sum((net.g_a[7].mask > 0.).view(-1)), net.g_a[9].weight.shape[0],
-            sum((net.g_s[1].mask > 0.).view(-1)), sum((net.g_s[4].mask > 0.).view(-1)), sum((net.g_s[7].mask > 0.).view(-1))]
 
 
 def main(argv):
@@ -461,13 +434,17 @@ def main(argv):
     optimizer, aux_optimizer = configure_optimizers(net, args)
     # lr_scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, "min", patience=10)
     lr_scheduler = optim.lr_scheduler.MultiStepLR(optimizer, (800,))
-    criterion = RateDistortionLoss(lmbda=args.lmbda, lpips=args.lpips, yuv=args.yuv_loss)
+    criterion = RateDistortionLoss(lmbda=args.lmbda)
 
-    ori_flops = calculate_cai_bmshj_main_flops(cal_deps(net))
+    ori_flops = net.param_scale()
 
     last_epoch = 0
-    if args.checkpoint:  # load from previous checkpoint
-        print("Loading", args.checkpoint)
+    if args.pretrained:
+        print("Loading pretrain", args.pretrained)
+        checkpoint = torch.load(args.pretrained, map_location=device)
+        net.load_state_dict(checkpoint["state_dict"])
+    elif args.checkpoint:  # load from previous checkpoint
+        print("Loading ckpt", args.checkpoint)
         checkpoint = torch.load(args.checkpoint, map_location=device)
         last_epoch = checkpoint["epoch"] + 1
         net.load_state_dict(checkpoint["state_dict"], True)
@@ -498,7 +475,7 @@ def main(argv):
                 args,
                 tick_round=args.tick_round
             )
-            if calculate_cai_bmshj_main_flops(cal_deps(net)) < args.flops_target * ori_flops:
+            if net.param_scale() < args.flops_target * ori_flops:
                 break
 
         loss = test_epoch(epoch, test_dataloader, net, criterion)
@@ -530,41 +507,60 @@ def main(argv):
 def prune_model(model, save_path):
     save_dict = model.state_dict()
     deps = []
-    for mask_name, weight_names in model.mask_weight_pairs.items():
-        if 'g_a' in mask_name: deconv = False
-        else: deconv = True
-
-        weight_name, bias_name, beta_name, gamma_name, suc_weight_name, gate_name = weight_names
-        weight, bias, beta, gamma, suc_weight, gate = map(lambda x: save_dict[x], weight_names)
+    for i, (mask_name, prune_helper) in enumerate(model.mask_weight_pairs.items()):
+        type = prune_helper.type
+        weight = save_dict[prune_helper.weight]
+        bias = save_dict[prune_helper.bias]
+        if prune_helper.suc_weight is not None:
+            suc_weight = save_dict[prune_helper.suc_weight]
+        if prune_helper.beta is not None:
+            beta = save_dict[prune_helper.beta]
+            gamma = save_dict[prune_helper.gamma]
+        gate = save_dict[prune_helper.gate]
 
         mask_idx = torch.where(save_dict[mask_name] > 0.)[1]
         deps.append(mask_idx.shape[0])
-        if deconv:
-            weight = torch.einsum('ijkv,ajbc->ijkv', weight, gate)
-            weight = weight[:, mask_idx]
-            suc_weight = suc_weight[mask_idx]
-        else:
+
+        if prune_helper.conv:
             weight = torch.einsum('jikv,ajbc->jikv', weight, gate)
             weight = weight[mask_idx]
-            suc_weight = suc_weight[:, mask_idx]
+        else:
+            weight = torch.einsum('ijkv,ajbc->ijkv', weight, gate)
+            weight = weight[:, mask_idx]
+
+        # 同一组只需要对相同的suc_weight处理一次，但hyper里暂时没有这种情况
+        if prune_helper.suc_conv is not None:
+            if prune_helper.suc_conv:
+                suc_weight = suc_weight[:, mask_idx]
+            else:
+                suc_weight = suc_weight[mask_idx]
+
         bias = bias*gate.view(-1)
         bias = bias[mask_idx]
-        beta = beta[mask_idx]
-        gamma = gamma[mask_idx]
-        gamma = gamma[:, mask_idx]
 
-        save_dict[weight_name] = weight
-        save_dict[bias_name] = bias
-        save_dict[beta_name] = beta
-        save_dict[gamma_name] = gamma
-        save_dict[suc_weight_name] = suc_weight
+        if prune_helper.beta is not None:
+            beta = beta[mask_idx]
+            gamma = gamma[mask_idx]
+            gamma = gamma[:, mask_idx]
+
+        if type == 'bottleneck':
+            for k, v in save_dict.items():
+                if 'entropy_bottleneck.' in k and v.shape[0] == save_dict[mask_name].shape[1]:
+                    save_dict[k] = v[mask_idx]
+
+        save_dict[prune_helper.weight] = weight
+        save_dict[prune_helper.bias] = bias
+        if prune_helper.beta is not None:
+            save_dict[prune_helper.beta] = beta
+            save_dict[prune_helper.gamma] = gamma
+        if prune_helper.suc_weight is not None:
+            save_dict[prune_helper.suc_weight] = suc_weight
     for k, v in model.KEY_TABLE.items():
         save_dict[k] = save_dict.pop(v)
     for k in model.mask_weight_pairs:
         save_dict.pop(k)
     for k in model.to_be_pop:
         save_dict.pop(k)
-    deps.insert(3, save_dict['g_a.6.weight'].shape[0])
     torch.save({'state_dict': save_dict, 'deps': deps}, os.path.join(save_path, 'pruned_model.pth'))
     print('save_path: ' + os.path.join(save_path, 'pruned_model.pth'))
 
