@@ -50,76 +50,52 @@ class CC(CompressionModel):
 
         self.h_a = nn.Sequential(
             conv3x3(320, 320),
-            nn.GELU(),
-            conv3x3(320, 288),
-            nn.GELU(),
-            conv3x3(288, 256, stride=2),
-            nn.GELU(),
-            conv3x3(256, 224),
-            nn.GELU(),
-            conv3x3(224, 192, stride=2),
+            nn.ReLU(),
+            conv(320, 256, stride=2),
+            nn.ReLU(),
+            conv(256, 192, stride=2),
         )
 
         self.h_mean_s = nn.Sequential(
-            conv3x3(192, 192),
-            nn.GELU(),
-            subpel_conv3x3(192, 224, 2),
-            nn.GELU(),
-            conv3x3(224, 256),
-            nn.GELU(),
-            subpel_conv3x3(256, 288, 2),
-            nn.GELU(),
-            conv3x3(288, 320),
+            deconv(192, 192, stride=2),
+            nn.ReLU(),
+            deconv(192, 256, stride=2),
+            nn.ReLU(),
+            conv3x3(256, 320),
         )
 
         self.h_scale_s = nn.Sequential(
-            conv3x3(192, 192),
-            nn.GELU(),
-            subpel_conv3x3(192, 224, 2),
-            nn.GELU(),
-            conv3x3(224, 256),
-            nn.GELU(),
-            subpel_conv3x3(256, 288, 2),
-            nn.GELU(),
-            conv3x3(288, 320),
+            deconv(192, 192, stride=2),
+            nn.ReLU(),
+            deconv(192, 256, stride=2),
+            nn.ReLU(),
+            conv3x3(256, 320),
         )
         self.cc_mean_transforms = nn.ModuleList(
             nn.Sequential(
-                conv(320 + 32*min(i, 5), 224, stride=1, kernel_size=3),
-                nn.GELU(),
-                conv(224, 176, stride=1, kernel_size=3),
-                nn.GELU(),
-                conv(176, 128, stride=1, kernel_size=3),
-                nn.GELU(),
-                conv(128, 64, stride=1, kernel_size=3),
-                nn.GELU(),
-                conv(64, 32, stride=1, kernel_size=3),
+                conv3x3(320 + 32*min(i, 5), 224),
+                nn.ReLU(),
+                conv3x3(224, 128),
+                nn.ReLU(),
+                conv3x3(128, 32),
             ) for i in range(10)
         )
         self.cc_scale_transforms = nn.ModuleList(
             nn.Sequential(
-                conv(320 + 32 * min(i, 5), 224, stride=1, kernel_size=3),
-                nn.GELU(),
-                conv(224, 176, stride=1, kernel_size=3),
-                nn.GELU(),
-                conv(176, 128, stride=1, kernel_size=3),
-                nn.GELU(),
-                conv(128, 64, stride=1, kernel_size=3),
-                nn.GELU(),
-                conv(64, 32, stride=1, kernel_size=3),
+                conv3x3(320 + 32*min(i, 5), 224),
+                nn.ReLU(),
+                conv3x3(224, 128),
+                nn.ReLU(),
+                conv3x3(128, 32),
             ) for i in range(10)
             )
         self.lrp_transforms = nn.ModuleList(
             nn.Sequential(
-                conv(320 + 32 * min(i+1, 6), 224, stride=1, kernel_size=3),
-                nn.GELU(),
-                conv(224, 176, stride=1, kernel_size=3),
-                nn.GELU(),
-                conv(176, 128, stride=1, kernel_size=3),
-                nn.GELU(),
-                conv(128, 64, stride=1, kernel_size=3),
-                nn.GELU(),
-                conv(64, 32, stride=1, kernel_size=3),
+                conv3x3(320 + 32*min(i+1, 6), 224),
+                nn.ReLU(),
+                conv3x3(224, 128),
+                nn.ReLU(),
+                conv3x3(128, 32),
             ) for i in range(10)
         )
 
@@ -327,7 +303,3 @@ class CC(CompressionModel):
         x_hat = self.g_s(y_hat).clamp_(0, 1)
 
         return {"x_hat": x_hat}
-
-
-
-

@@ -1,6 +1,7 @@
 import math
 import torch
 import torch.nn as nn
+from collections import OrderedDict
 
 from compressai.ans import BufferedRansEncoder, RansDecoder
 from compressai.entropy_models import EntropyBottleneck, GaussianConditional
@@ -9,6 +10,7 @@ from .utils import conv, deconv, update_registered_buffers
 from compressai.ops import ste_round
 from compressai.layers import conv3x3, subpel_conv3x3, Win_noShift_Attention
 from .base import CompressionModel
+
 
 # From Balle's tensorflow compression examples
 SCALES_MIN = 0.11
@@ -20,7 +22,7 @@ def get_scale_table(min=SCALES_MIN, max=SCALES_MAX, levels=SCALES_LEVELS):
     return torch.exp(torch.linspace(math.log(min), math.log(max), levels))
 
 
-class CCGD(CompressionModel):
+class CC_GD(CompressionModel):
     """Channel-wise Context model"""
 
     def __init__(self, N=192, M=320, sparse_lambda=0.5, **kwargs):
@@ -51,82 +53,84 @@ class CCGD(CompressionModel):
 
         self.h_a = nn.Sequential(
             conv3x3(320, 320),
-            nn.GELU(),
-            conv3x3(320, 288),
-            nn.GELU(),
-            conv3x3(288, 256, stride=2),
-            nn.GELU(),
-            conv3x3(256, 224),
-            nn.GELU(),
-            conv3x3(224, 192, stride=2),
+            GateDecorator(320),
+            nn.ReLU(),
+            conv(320, 256, stride=2),
+            GateDecorator(256),
+            nn.ReLU(),
+            conv(256, 192, stride=2),
+            GateDecorator(192),
         )
 
         self.h_mean_s = nn.Sequential(
-            conv3x3(192, 192),
-            nn.GELU(),
-            subpel_conv3x3(192, 224, 2),
-            nn.GELU(),
-            conv3x3(224, 256),
-            nn.GELU(),
-            subpel_conv3x3(256, 288, 2),
-            nn.GELU(),
-            conv3x3(288, 320),
+            deconv(192, 192, stride=2),
+            GateDecorator(192),
+            nn.ReLU(),
+            deconv(192, 256, stride=2),
+            GateDecorator(256),
+            nn.ReLU(),
+            conv3x3(256, 320),
+            GateDecorator(320),
         )
 
         self.h_scale_s = nn.Sequential(
-            conv3x3(192, 192),
-            nn.GELU(),
-            subpel_conv3x3(192, 224, 2),
-            nn.GELU(),
-            conv3x3(224, 256),
-            nn.GELU(),
-            subpel_conv3x3(256, 288, 2),
-            nn.GELU(),
-            conv3x3(288, 320),
+            deconv(192, 192, stride=2),
+            GateDecorator(192),
+            nn.ReLU(),
+            deconv(192, 256, stride=2),
+            GateDecorator(256),
+            nn.ReLU(),
+            conv3x3(256, 320),
+            GateDecorator(320),
         )
         self.cc_mean_transforms = nn.ModuleList(
             nn.Sequential(
-                conv(320 + 32*min(i, 5), 224, stride=1, kernel_size=3),
-                nn.GELU(),
-                conv(224, 176, stride=1, kernel_size=3),
-                nn.GELU(),
-                conv(176, 128, stride=1, kernel_size=3),
-                nn.GELU(),
-                conv(128, 64, stride=1, kernel_size=3),
-                nn.GELU(),
-                conv(64, 32, stride=1, kernel_size=3),
+                conv3x3(320 + 32*min(i, 5), 224),
+                GateDecorator(224),
+                nn.ReLU(),
+                conv3x3(224, 128),
+                GateDecorator(128),
+                nn.ReLU(),
+                conv3x3(128, 32),
             ) for i in range(10)
         )
         self.cc_scale_transforms = nn.ModuleList(
             nn.Sequential(
-                conv(320 + 32 * min(i, 5), 224, stride=1, kernel_size=3),
-                nn.GELU(),
-                conv(224, 176, stride=1, kernel_size=3),
-                nn.GELU(),
-                conv(176, 128, stride=1, kernel_size=3),
-                nn.GELU(),
-                conv(128, 64, stride=1, kernel_size=3),
-                nn.GELU(),
-                conv(64, 32, stride=1, kernel_size=3),
+                conv3x3(320 + 32*min(i, 5), 224),
+                GateDecorator(224),
+                nn.ReLU(),
+                conv3x3(224, 128),
+                GateDecorator(128),
+                nn.ReLU(),
+                conv3x3(128, 32),
             ) for i in range(10)
             )
         self.lrp_transforms = nn.ModuleList(
             nn.Sequential(
-                conv(320 + 32 * min(i+1, 6), 224, stride=1, kernel_size=3),
-                nn.GELU(),
-                conv(224, 176, stride=1, kernel_size=3),
-                nn.GELU(),
-                conv(176, 128, stride=1, kernel_size=3),
-                nn.GELU(),
-                conv(128, 64, stride=1, kernel_size=3),
-                nn.GELU(),
-                conv(64, 32, stride=1, kernel_size=3),
+                conv3x3(320 + 32*min(i+1, 6), 224),
+                GateDecorator(224),
+                nn.ReLU(),
+                conv3x3(224, 128),
+                GateDecorator(128),
+                nn.ReLU(),
+                conv3x3(128, 32),
             ) for i in range(10)
         )
 
         self.entropy_bottleneck = EntropyBottleneck(N)
         self.gaussian_conditional = GaussianConditional(None)
 
+        self.gds = [
+            self.h_a[1], self.h_a[4], self.h_a[7],
+            self.h_mean_s[1], self.h_mean_s[4], self.h_mean_s[7],
+            self.h_scale_s[1], self.h_scale_s[4], self.h_scale_s[7],
+        ]
+        self.gds += [self.cc_mean_transforms[i][1] for i in range(10)]
+        self.gds += [self.cc_mean_transforms[i][4] for i in range(10)]
+        self.gds += [self.cc_scale_transforms[i][1] for i in range(10)]
+        self.gds += [self.cc_scale_transforms[i][4] for i in range(10)]
+        self.gds += [self.lrp_transforms[i][1] for i in range(10)]
+        self.gds += [self.lrp_transforms[i][4] for i in range(10)]
 
     def update(self, scale_table=None, force=False):
         if scale_table is None:
@@ -134,7 +138,6 @@ class CCGD(CompressionModel):
         updated = self.gaussian_conditional.update_scale_table(scale_table, force=force)
         updated |= super().update(force=force)
         return updated
-
 
     def forward(self, x):
         y = self.g_a(x)
@@ -186,14 +189,20 @@ class CCGD(CompressionModel):
             "likelihoods": {"y": y_likelihoods, "z": z_likelihoods},
         }
 
-    def load_state_dict(self, state_dict):
+    def load_state_dict(self, state_dict, ckpt=False):
         update_registered_buffers(
             self.gaussian_conditional,
             "gaussian_conditional",
             ["_quantized_cdf", "_offset", "_cdf_length", "scale_table"],
             state_dict,
         )
-        super().load_state_dict(state_dict)
+        if ckpt:
+            super().load_state_dict(state_dict)
+        else:
+            cur_state_dict = self.state_dict()
+            for k, v in self.KEY_TABLE.items():
+                cur_state_dict[v] = state_dict[k]
+            super().load_state_dict(cur_state_dict)
 
     @classmethod
     def from_state_dict(cls, state_dict):
@@ -328,6 +337,399 @@ class CCGD(CompressionModel):
         x_hat = self.g_s(y_hat).clamp_(0, 1)
 
         return {"x_hat": x_hat}
+    
+    def param_scale(self):
+        # TODO
+        return 1.
+
+    class PruneHelper:
+        def __init__(self, type, weight, bias, suc_weight, gate, is_conv=True, suc_is_conv=True, start_ch=0, end_ch=-1) -> None:
+            self.type = type
+            self.weight = weight
+            self.bias = bias
+            self.suc_weight = suc_weight
+            self.gate = gate
+            self.is_conv = is_conv
+            self.suc_is_conv = suc_is_conv
+            self.start_ch = start_ch
+            self.end_ch = end_ch
+
+    KEY_TABLE = {
+        'h_a.0.weight': 'h_a.0.weight',
+        'h_a.0.bias': 'h_a.0.bias',
+        'h_a.2.weight': 'h_a.3.weight',
+        'h_a.2.bias': 'h_a.3.bias',
+        'h_a.4.weight': 'h_a.6.weight',
+        'h_a.4.bias': 'h_a.6.bias',
+        'h_mean_s.0.weight': 'h_mean_s.0.weight',
+        'h_mean_s.0.bias': 'h_mean_s.0.bias',
+        'h_mean_s.2.weight': 'h_mean_s.3.weight',
+        'h_mean_s.2.bias': 'h_mean_s.3.bias',
+        'h_mean_s.4.weight': 'h_mean_s.6.weight',
+        'h_mean_s.4.bias': 'h_mean_s.6.bias',
+        'h_scale_s.0.weight': 'h_scale_s.0.weight',
+        'h_scale_s.0.bias': 'h_scale_s.0.bias',
+        'h_scale_s.2.weight': 'h_scale_s.3.weight',
+        'h_scale_s.2.bias': 'h_scale_s.3.bias',
+        'h_scale_s.4.weight': 'h_scale_s.6.weight',
+        'h_scale_s.4.bias': 'h_scale_s.6.bias',
+        'cc_mean_transforms.0.0.weight': 'cc_mean_transforms.0.0.weight',
+        'cc_mean_transforms.0.0.bias': 'cc_mean_transforms.0.0.bias',
+        'cc_mean_transforms.0.2.weight': 'cc_mean_transforms.0.3.weight',
+        'cc_mean_transforms.0.2.bias': 'cc_mean_transforms.0.3.bias',
+        'cc_mean_transforms.0.4.weight': 'cc_mean_transforms.0.6.weight',
+        'cc_mean_transforms.0.4.bias': 'cc_mean_transforms.0.6.bias',
+        'cc_mean_transforms.1.0.weight': 'cc_mean_transforms.1.0.weight',
+        'cc_mean_transforms.1.0.bias': 'cc_mean_transforms.1.0.bias',
+        'cc_mean_transforms.1.2.weight': 'cc_mean_transforms.1.3.weight',
+        'cc_mean_transforms.1.2.bias': 'cc_mean_transforms.1.3.bias',
+        'cc_mean_transforms.1.4.weight': 'cc_mean_transforms.1.6.weight',
+        'cc_mean_transforms.1.4.bias': 'cc_mean_transforms.1.6.bias',
+        'cc_mean_transforms.2.0.weight': 'cc_mean_transforms.2.0.weight',
+        'cc_mean_transforms.2.0.bias': 'cc_mean_transforms.2.0.bias',
+        'cc_mean_transforms.2.2.weight': 'cc_mean_transforms.2.3.weight',
+        'cc_mean_transforms.2.2.bias': 'cc_mean_transforms.2.3.bias',
+        'cc_mean_transforms.2.4.weight': 'cc_mean_transforms.2.6.weight',
+        'cc_mean_transforms.2.4.bias': 'cc_mean_transforms.2.6.bias',
+        'cc_mean_transforms.3.0.weight': 'cc_mean_transforms.3.0.weight',
+        'cc_mean_transforms.3.0.bias': 'cc_mean_transforms.3.0.bias',
+        'cc_mean_transforms.3.2.weight': 'cc_mean_transforms.3.3.weight',
+        'cc_mean_transforms.3.2.bias': 'cc_mean_transforms.3.3.bias',
+        'cc_mean_transforms.3.4.weight': 'cc_mean_transforms.3.6.weight',
+        'cc_mean_transforms.3.4.bias': 'cc_mean_transforms.3.6.bias',
+        'cc_mean_transforms.4.0.weight': 'cc_mean_transforms.4.0.weight',
+        'cc_mean_transforms.4.0.bias': 'cc_mean_transforms.4.0.bias',
+        'cc_mean_transforms.4.2.weight': 'cc_mean_transforms.4.3.weight',
+        'cc_mean_transforms.4.2.bias': 'cc_mean_transforms.4.3.bias',
+        'cc_mean_transforms.4.4.weight': 'cc_mean_transforms.4.6.weight',
+        'cc_mean_transforms.4.4.bias': 'cc_mean_transforms.4.6.bias',
+        'cc_mean_transforms.5.0.weight': 'cc_mean_transforms.5.0.weight',
+        'cc_mean_transforms.5.0.bias': 'cc_mean_transforms.5.0.bias',
+        'cc_mean_transforms.5.2.weight': 'cc_mean_transforms.5.3.weight',
+        'cc_mean_transforms.5.2.bias': 'cc_mean_transforms.5.3.bias',
+        'cc_mean_transforms.5.4.weight': 'cc_mean_transforms.5.6.weight',
+        'cc_mean_transforms.5.4.bias': 'cc_mean_transforms.5.6.bias',
+        'cc_mean_transforms.6.0.weight': 'cc_mean_transforms.6.0.weight',
+        'cc_mean_transforms.6.0.bias': 'cc_mean_transforms.6.0.bias',
+        'cc_mean_transforms.6.2.weight': 'cc_mean_transforms.6.3.weight',
+        'cc_mean_transforms.6.2.bias': 'cc_mean_transforms.6.3.bias',
+        'cc_mean_transforms.6.4.weight': 'cc_mean_transforms.6.6.weight',
+        'cc_mean_transforms.6.4.bias': 'cc_mean_transforms.6.6.bias',
+        'cc_mean_transforms.7.0.weight': 'cc_mean_transforms.7.0.weight',
+        'cc_mean_transforms.7.0.bias': 'cc_mean_transforms.7.0.bias',
+        'cc_mean_transforms.7.2.weight': 'cc_mean_transforms.7.3.weight',
+        'cc_mean_transforms.7.2.bias': 'cc_mean_transforms.7.3.bias',
+        'cc_mean_transforms.7.4.weight': 'cc_mean_transforms.7.6.weight',
+        'cc_mean_transforms.7.4.bias': 'cc_mean_transforms.7.6.bias',
+        'cc_mean_transforms.8.0.weight': 'cc_mean_transforms.8.0.weight',
+        'cc_mean_transforms.8.0.bias': 'cc_mean_transforms.8.0.bias',
+        'cc_mean_transforms.8.2.weight': 'cc_mean_transforms.8.3.weight',
+        'cc_mean_transforms.8.2.bias': 'cc_mean_transforms.8.3.bias',
+        'cc_mean_transforms.8.4.weight': 'cc_mean_transforms.8.6.weight',
+        'cc_mean_transforms.8.4.bias': 'cc_mean_transforms.8.6.bias',
+        'cc_mean_transforms.9.0.weight': 'cc_mean_transforms.9.0.weight',
+        'cc_mean_transforms.9.0.bias': 'cc_mean_transforms.9.0.bias',
+        'cc_mean_transforms.9.2.weight': 'cc_mean_transforms.9.3.weight',
+        'cc_mean_transforms.9.2.bias': 'cc_mean_transforms.9.3.bias',
+        'cc_mean_transforms.9.4.weight': 'cc_mean_transforms.9.6.weight',
+        'cc_mean_transforms.9.4.bias': 'cc_mean_transforms.9.6.bias',
+        'cc_scale_transforms.0.0.weight': 'cc_scale_transforms.0.0.weight',
+        'cc_scale_transforms.0.0.bias': 'cc_scale_transforms.0.0.bias',
+        'cc_scale_transforms.0.2.weight': 'cc_scale_transforms.0.3.weight',
+        'cc_scale_transforms.0.2.bias': 'cc_scale_transforms.0.3.bias',
+        'cc_scale_transforms.0.4.weight': 'cc_scale_transforms.0.6.weight',
+        'cc_scale_transforms.0.4.bias': 'cc_scale_transforms.0.6.bias',
+        'cc_scale_transforms.1.0.weight': 'cc_scale_transforms.1.0.weight',
+        'cc_scale_transforms.1.0.bias': 'cc_scale_transforms.1.0.bias',
+        'cc_scale_transforms.1.2.weight': 'cc_scale_transforms.1.3.weight',
+        'cc_scale_transforms.1.2.bias': 'cc_scale_transforms.1.3.bias',
+        'cc_scale_transforms.1.4.weight': 'cc_scale_transforms.1.6.weight',
+        'cc_scale_transforms.1.4.bias': 'cc_scale_transforms.1.6.bias',
+        'cc_scale_transforms.2.0.weight': 'cc_scale_transforms.2.0.weight',
+        'cc_scale_transforms.2.0.bias': 'cc_scale_transforms.2.0.bias',
+        'cc_scale_transforms.2.2.weight': 'cc_scale_transforms.2.3.weight',
+        'cc_scale_transforms.2.2.bias': 'cc_scale_transforms.2.3.bias',
+        'cc_scale_transforms.2.4.weight': 'cc_scale_transforms.2.6.weight',
+        'cc_scale_transforms.2.4.bias': 'cc_scale_transforms.2.6.bias',
+        'cc_scale_transforms.3.0.weight': 'cc_scale_transforms.3.0.weight',
+        'cc_scale_transforms.3.0.bias': 'cc_scale_transforms.3.0.bias',
+        'cc_scale_transforms.3.2.weight': 'cc_scale_transforms.3.3.weight',
+        'cc_scale_transforms.3.2.bias': 'cc_scale_transforms.3.3.bias',
+        'cc_scale_transforms.3.4.weight': 'cc_scale_transforms.3.6.weight',
+        'cc_scale_transforms.3.4.bias': 'cc_scale_transforms.3.6.bias',
+        'cc_scale_transforms.4.0.weight': 'cc_scale_transforms.4.0.weight',
+        'cc_scale_transforms.4.0.bias': 'cc_scale_transforms.4.0.bias',
+        'cc_scale_transforms.4.2.weight': 'cc_scale_transforms.4.3.weight',
+        'cc_scale_transforms.4.2.bias': 'cc_scale_transforms.4.3.bias',
+        'cc_scale_transforms.4.4.weight': 'cc_scale_transforms.4.6.weight',
+        'cc_scale_transforms.4.4.bias': 'cc_scale_transforms.4.6.bias',
+        'cc_scale_transforms.5.0.weight': 'cc_scale_transforms.5.0.weight',
+        'cc_scale_transforms.5.0.bias': 'cc_scale_transforms.5.0.bias',
+        'cc_scale_transforms.5.2.weight': 'cc_scale_transforms.5.3.weight',
+        'cc_scale_transforms.5.2.bias': 'cc_scale_transforms.5.3.bias',
+        'cc_scale_transforms.5.4.weight': 'cc_scale_transforms.5.6.weight',
+        'cc_scale_transforms.5.4.bias': 'cc_scale_transforms.5.6.bias',
+        'cc_scale_transforms.6.0.weight': 'cc_scale_transforms.6.0.weight',
+        'cc_scale_transforms.6.0.bias': 'cc_scale_transforms.6.0.bias',
+        'cc_scale_transforms.6.2.weight': 'cc_scale_transforms.6.3.weight',
+        'cc_scale_transforms.6.2.bias': 'cc_scale_transforms.6.3.bias',
+        'cc_scale_transforms.6.4.weight': 'cc_scale_transforms.6.6.weight',
+        'cc_scale_transforms.6.4.bias': 'cc_scale_transforms.6.6.bias',
+        'cc_scale_transforms.7.0.weight': 'cc_scale_transforms.7.0.weight',
+        'cc_scale_transforms.7.0.bias': 'cc_scale_transforms.7.0.bias',
+        'cc_scale_transforms.7.2.weight': 'cc_scale_transforms.7.3.weight',
+        'cc_scale_transforms.7.2.bias': 'cc_scale_transforms.7.3.bias',
+        'cc_scale_transforms.7.4.weight': 'cc_scale_transforms.7.6.weight',
+        'cc_scale_transforms.7.4.bias': 'cc_scale_transforms.7.6.bias',
+        'cc_scale_transforms.8.0.weight': 'cc_scale_transforms.8.0.weight',
+        'cc_scale_transforms.8.0.bias': 'cc_scale_transforms.8.0.bias',
+        'cc_scale_transforms.8.2.weight': 'cc_scale_transforms.8.3.weight',
+        'cc_scale_transforms.8.2.bias': 'cc_scale_transforms.8.3.bias',
+        'cc_scale_transforms.8.4.weight': 'cc_scale_transforms.8.6.weight',
+        'cc_scale_transforms.8.4.bias': 'cc_scale_transforms.8.6.bias',
+        'cc_scale_transforms.9.0.weight': 'cc_scale_transforms.9.0.weight',
+        'cc_scale_transforms.9.0.bias': 'cc_scale_transforms.9.0.bias',
+        'cc_scale_transforms.9.2.weight': 'cc_scale_transforms.9.3.weight',
+        'cc_scale_transforms.9.2.bias': 'cc_scale_transforms.9.3.bias',
+        'cc_scale_transforms.9.4.weight': 'cc_scale_transforms.9.6.weight',
+        'cc_scale_transforms.9.4.bias': 'cc_scale_transforms.9.6.bias',
+        'lrp_transforms.0.0.weight': 'lrp_transforms.0.0.weight',
+        'lrp_transforms.0.0.bias': 'lrp_transforms.0.0.bias',
+        'lrp_transforms.0.2.weight': 'lrp_transforms.0.3.weight',
+        'lrp_transforms.0.2.bias': 'lrp_transforms.0.3.bias',
+        'lrp_transforms.0.4.weight': 'lrp_transforms.0.6.weight',
+        'lrp_transforms.0.4.bias': 'lrp_transforms.0.6.bias',
+        'lrp_transforms.1.0.weight': 'lrp_transforms.1.0.weight',
+        'lrp_transforms.1.0.bias': 'lrp_transforms.1.0.bias',
+        'lrp_transforms.1.2.weight': 'lrp_transforms.1.3.weight',
+        'lrp_transforms.1.2.bias': 'lrp_transforms.1.3.bias',
+        'lrp_transforms.1.4.weight': 'lrp_transforms.1.6.weight',
+        'lrp_transforms.1.4.bias': 'lrp_transforms.1.6.bias',
+        'lrp_transforms.2.0.weight': 'lrp_transforms.2.0.weight',
+        'lrp_transforms.2.0.bias': 'lrp_transforms.2.0.bias',
+        'lrp_transforms.2.2.weight': 'lrp_transforms.2.3.weight',
+        'lrp_transforms.2.2.bias': 'lrp_transforms.2.3.bias',
+        'lrp_transforms.2.4.weight': 'lrp_transforms.2.6.weight',
+        'lrp_transforms.2.4.bias': 'lrp_transforms.2.6.bias',
+        'lrp_transforms.3.0.weight': 'lrp_transforms.3.0.weight',
+        'lrp_transforms.3.0.bias': 'lrp_transforms.3.0.bias',
+        'lrp_transforms.3.2.weight': 'lrp_transforms.3.3.weight',
+        'lrp_transforms.3.2.bias': 'lrp_transforms.3.3.bias',
+        'lrp_transforms.3.4.weight': 'lrp_transforms.3.6.weight',
+        'lrp_transforms.3.4.bias': 'lrp_transforms.3.6.bias',
+        'lrp_transforms.4.0.weight': 'lrp_transforms.4.0.weight',
+        'lrp_transforms.4.0.bias': 'lrp_transforms.4.0.bias',
+        'lrp_transforms.4.2.weight': 'lrp_transforms.4.3.weight',
+        'lrp_transforms.4.2.bias': 'lrp_transforms.4.3.bias',
+        'lrp_transforms.4.4.weight': 'lrp_transforms.4.6.weight',
+        'lrp_transforms.4.4.bias': 'lrp_transforms.4.6.bias',
+        'lrp_transforms.5.0.weight': 'lrp_transforms.5.0.weight',
+        'lrp_transforms.5.0.bias': 'lrp_transforms.5.0.bias',
+        'lrp_transforms.5.2.weight': 'lrp_transforms.5.3.weight',
+        'lrp_transforms.5.2.bias': 'lrp_transforms.5.3.bias',
+        'lrp_transforms.5.4.weight': 'lrp_transforms.5.6.weight',
+        'lrp_transforms.5.4.bias': 'lrp_transforms.5.6.bias',
+        'lrp_transforms.6.0.weight': 'lrp_transforms.6.0.weight',
+        'lrp_transforms.6.0.bias': 'lrp_transforms.6.0.bias',
+        'lrp_transforms.6.2.weight': 'lrp_transforms.6.3.weight',
+        'lrp_transforms.6.2.bias': 'lrp_transforms.6.3.bias',
+        'lrp_transforms.6.4.weight': 'lrp_transforms.6.6.weight',
+        'lrp_transforms.6.4.bias': 'lrp_transforms.6.6.bias',
+        'lrp_transforms.7.0.weight': 'lrp_transforms.7.0.weight',
+        'lrp_transforms.7.0.bias': 'lrp_transforms.7.0.bias',
+        'lrp_transforms.7.2.weight': 'lrp_transforms.7.3.weight',
+        'lrp_transforms.7.2.bias': 'lrp_transforms.7.3.bias',
+        'lrp_transforms.7.4.weight': 'lrp_transforms.7.6.weight',
+        'lrp_transforms.7.4.bias': 'lrp_transforms.7.6.bias',
+        'lrp_transforms.8.0.weight': 'lrp_transforms.8.0.weight',
+        'lrp_transforms.8.0.bias': 'lrp_transforms.8.0.bias',
+        'lrp_transforms.8.2.weight': 'lrp_transforms.8.3.weight',
+        'lrp_transforms.8.2.bias': 'lrp_transforms.8.3.bias',
+        'lrp_transforms.8.4.weight': 'lrp_transforms.8.6.weight',
+        'lrp_transforms.8.4.bias': 'lrp_transforms.8.6.bias',
+        'lrp_transforms.9.0.weight': 'lrp_transforms.9.0.weight',
+        'lrp_transforms.9.0.bias': 'lrp_transforms.9.0.bias',
+        'lrp_transforms.9.2.weight': 'lrp_transforms.9.3.weight',
+        'lrp_transforms.9.2.bias': 'lrp_transforms.9.3.bias',
+        'lrp_transforms.9.4.weight': 'lrp_transforms.9.6.weight',
+        'lrp_transforms.9.4.bias': 'lrp_transforms.9.6.bias',
+    }
+
+    mask_weight_pairs = OrderedDict([
+        ('h_a.1.mask', PruneHelper('normal', 'h_a.0.weight', 'h_a.0.bias', ['h_a.3.weight'], 'h_a.1.gate')),
+        ('h_a.4.mask', PruneHelper('normal', 'h_a.3.weight', 'h_a.3.bias', ['h_a.6.weight'], 'h_a.4.gate')),
+        ('h_a.7.mask', PruneHelper('bottleneck', 'h_a.6.weight', 'h_a.6.bias', ['h_mean_s.0.weight', 'h_scale_s.0.weight'], 'h_a.7.gate', suc_is_conv=False)),
+        ('h_mean_s.1.mask', PruneHelper('normal', 'h_mean_s.0.weight', 'h_mean_s.0.bias', ['h_mean_s.3.weight'], 'h_mean_s.1.gate', is_conv=False, suc_is_conv=False)),
+        ('h_mean_s.4.mask', PruneHelper('normal', 'h_mean_s.3.weight', 'h_mean_s.3.bias', ['h_mean_s.6.weight'], 'h_mean_s.4.gate', is_conv=False)),
+        ('h_mean_s.7.mask', PruneHelper('normal', 'h_mean_s.6.weight', 'h_mean_s.6.bias', [
+            'cc_mean_transforms.0.0.weight',
+            'cc_mean_transforms.1.0.weight',
+            'cc_mean_transforms.2.0.weight',
+            'cc_mean_transforms.3.0.weight',
+            'cc_mean_transforms.4.0.weight',
+            'cc_mean_transforms.5.0.weight',
+            'cc_mean_transforms.6.0.weight',
+            'cc_mean_transforms.7.0.weight',
+            'cc_mean_transforms.8.0.weight',
+            'cc_mean_transforms.9.0.weight',
+            'lrp_transforms.0.0.weight',
+            'lrp_transforms.1.0.weight',
+            'lrp_transforms.2.0.weight',
+            'lrp_transforms.3.0.weight',
+            'lrp_transforms.4.0.weight',
+            'lrp_transforms.5.0.weight',
+            'lrp_transforms.6.0.weight',
+            'lrp_transforms.7.0.weight',
+            'lrp_transforms.8.0.weight',
+            'lrp_transforms.9.0.weight',
+            ], 'h_mean_s.7.gate', end_ch=320)),
+        ('h_scale_s.1.mask', PruneHelper('normal', 'h_scale_s.0.weight', 'h_scale_s.0.bias', ['h_scale_s.3.weight'], 'h_scale_s.1.gate', is_conv=False, suc_is_conv=False)),
+        ('h_scale_s.4.mask', PruneHelper('normal', 'h_scale_s.3.weight', 'h_scale_s.3.bias', ['h_scale_s.6.weight'], 'h_scale_s.4.gate', is_conv=False)),
+        ('h_scale_s.7.mask', PruneHelper('normal', 'h_scale_s.6.weight', 'h_scale_s.6.bias', [
+            'cc_scale_transforms.0.0.weight',
+            'cc_scale_transforms.1.0.weight',
+            'cc_scale_transforms.2.0.weight',
+            'cc_scale_transforms.3.0.weight',
+            'cc_scale_transforms.4.0.weight',
+            'cc_scale_transforms.5.0.weight',
+            'cc_scale_transforms.6.0.weight',
+            'cc_scale_transforms.7.0.weight',
+            'cc_scale_transforms.8.0.weight',
+            'cc_scale_transforms.9.0.weight',
+            ], 'h_scale_s.7.gate', end_ch=320)),
+        ('cc_mean_transforms.0.1.mask', PruneHelper('normal', 'cc_mean_transforms.0.0.weight', 'cc_mean_transforms.0.0.bias', ['cc_mean_transforms.0.3.weight'], 'cc_mean_transforms.0.1.gate')),
+        ('cc_mean_transforms.0.4.mask', PruneHelper('normal', 'cc_mean_transforms.0.3.weight', 'cc_mean_transforms.0.3.bias', ['cc_mean_transforms.0.6.weight'], 'cc_mean_transforms.0.4.gate')),
+        ('cc_mean_transforms.1.1.mask', PruneHelper('normal', 'cc_mean_transforms.1.0.weight', 'cc_mean_transforms.1.0.bias', ['cc_mean_transforms.1.3.weight'], 'cc_mean_transforms.1.1.gate')),
+        ('cc_mean_transforms.1.4.mask', PruneHelper('normal', 'cc_mean_transforms.1.3.weight', 'cc_mean_transforms.1.3.bias', ['cc_mean_transforms.1.6.weight'], 'cc_mean_transforms.1.4.gate')),
+        ('cc_mean_transforms.2.1.mask', PruneHelper('normal', 'cc_mean_transforms.2.0.weight', 'cc_mean_transforms.2.0.bias', ['cc_mean_transforms.2.3.weight'], 'cc_mean_transforms.2.1.gate')),
+        ('cc_mean_transforms.2.4.mask', PruneHelper('normal', 'cc_mean_transforms.2.3.weight', 'cc_mean_transforms.2.3.bias', ['cc_mean_transforms.2.6.weight'], 'cc_mean_transforms.2.4.gate')),
+        ('cc_mean_transforms.3.1.mask', PruneHelper('normal', 'cc_mean_transforms.3.0.weight', 'cc_mean_transforms.3.0.bias', ['cc_mean_transforms.3.3.weight'], 'cc_mean_transforms.3.1.gate')),
+        ('cc_mean_transforms.3.4.mask', PruneHelper('normal', 'cc_mean_transforms.3.3.weight', 'cc_mean_transforms.3.3.bias', ['cc_mean_transforms.3.6.weight'], 'cc_mean_transforms.3.4.gate')),
+        ('cc_mean_transforms.4.1.mask', PruneHelper('normal', 'cc_mean_transforms.4.0.weight', 'cc_mean_transforms.4.0.bias', ['cc_mean_transforms.4.3.weight'], 'cc_mean_transforms.4.1.gate')),
+        ('cc_mean_transforms.4.4.mask', PruneHelper('normal', 'cc_mean_transforms.4.3.weight', 'cc_mean_transforms.4.3.bias', ['cc_mean_transforms.4.6.weight'], 'cc_mean_transforms.4.4.gate')),
+        ('cc_mean_transforms.5.1.mask', PruneHelper('normal', 'cc_mean_transforms.5.0.weight', 'cc_mean_transforms.5.0.bias', ['cc_mean_transforms.5.3.weight'], 'cc_mean_transforms.5.1.gate')),
+        ('cc_mean_transforms.5.4.mask', PruneHelper('normal', 'cc_mean_transforms.5.3.weight', 'cc_mean_transforms.5.3.bias', ['cc_mean_transforms.5.6.weight'], 'cc_mean_transforms.5.4.gate')),
+        ('cc_mean_transforms.6.1.mask', PruneHelper('normal', 'cc_mean_transforms.6.0.weight', 'cc_mean_transforms.6.0.bias', ['cc_mean_transforms.6.3.weight'], 'cc_mean_transforms.6.1.gate')),
+        ('cc_mean_transforms.6.4.mask', PruneHelper('normal', 'cc_mean_transforms.6.3.weight', 'cc_mean_transforms.6.3.bias', ['cc_mean_transforms.6.6.weight'], 'cc_mean_transforms.6.4.gate')),
+        ('cc_mean_transforms.7.1.mask', PruneHelper('normal', 'cc_mean_transforms.7.0.weight', 'cc_mean_transforms.7.0.bias', ['cc_mean_transforms.7.3.weight'], 'cc_mean_transforms.7.1.gate')),
+        ('cc_mean_transforms.7.4.mask', PruneHelper('normal', 'cc_mean_transforms.7.3.weight', 'cc_mean_transforms.7.3.bias', ['cc_mean_transforms.7.6.weight'], 'cc_mean_transforms.7.4.gate')),
+        ('cc_mean_transforms.8.1.mask', PruneHelper('normal', 'cc_mean_transforms.8.0.weight', 'cc_mean_transforms.8.0.bias', ['cc_mean_transforms.8.3.weight'], 'cc_mean_transforms.8.1.gate')),
+        ('cc_mean_transforms.8.4.mask', PruneHelper('normal', 'cc_mean_transforms.8.3.weight', 'cc_mean_transforms.8.3.bias', ['cc_mean_transforms.8.6.weight'], 'cc_mean_transforms.8.4.gate')),
+        ('cc_mean_transforms.9.1.mask', PruneHelper('normal', 'cc_mean_transforms.9.0.weight', 'cc_mean_transforms.9.0.bias', ['cc_mean_transforms.9.3.weight'], 'cc_mean_transforms.9.1.gate')),
+        ('cc_mean_transforms.9.4.mask', PruneHelper('normal', 'cc_mean_transforms.9.3.weight', 'cc_mean_transforms.9.3.bias', ['cc_mean_transforms.9.6.weight'], 'cc_mean_transforms.9.4.gate')),
+        ('cc_scale_transforms.0.1.mask', PruneHelper('normal', 'cc_scale_transforms.0.0.weight', 'cc_scale_transforms.0.0.bias', ['cc_scale_transforms.0.3.weight'], 'cc_scale_transforms.0.1.gate')),
+        ('cc_scale_transforms.0.4.mask', PruneHelper('normal', 'cc_scale_transforms.0.3.weight', 'cc_scale_transforms.0.3.bias', ['cc_scale_transforms.0.6.weight'], 'cc_scale_transforms.0.4.gate')),
+        ('cc_scale_transforms.1.1.mask', PruneHelper('normal', 'cc_scale_transforms.1.0.weight', 'cc_scale_transforms.1.0.bias', ['cc_scale_transforms.1.3.weight'], 'cc_scale_transforms.1.1.gate')),
+        ('cc_scale_transforms.1.4.mask', PruneHelper('normal', 'cc_scale_transforms.1.3.weight', 'cc_scale_transforms.1.3.bias', ['cc_scale_transforms.1.6.weight'], 'cc_scale_transforms.1.4.gate')),
+        ('cc_scale_transforms.2.1.mask', PruneHelper('normal', 'cc_scale_transforms.2.0.weight', 'cc_scale_transforms.2.0.bias', ['cc_scale_transforms.2.3.weight'], 'cc_scale_transforms.2.1.gate')),
+        ('cc_scale_transforms.2.4.mask', PruneHelper('normal', 'cc_scale_transforms.2.3.weight', 'cc_scale_transforms.2.3.bias', ['cc_scale_transforms.2.6.weight'], 'cc_scale_transforms.2.4.gate')),
+        ('cc_scale_transforms.3.1.mask', PruneHelper('normal', 'cc_scale_transforms.3.0.weight', 'cc_scale_transforms.3.0.bias', ['cc_scale_transforms.3.3.weight'], 'cc_scale_transforms.3.1.gate')),
+        ('cc_scale_transforms.3.4.mask', PruneHelper('normal', 'cc_scale_transforms.3.3.weight', 'cc_scale_transforms.3.3.bias', ['cc_scale_transforms.3.6.weight'], 'cc_scale_transforms.3.4.gate')),
+        ('cc_scale_transforms.4.1.mask', PruneHelper('normal', 'cc_scale_transforms.4.0.weight', 'cc_scale_transforms.4.0.bias', ['cc_scale_transforms.4.3.weight'], 'cc_scale_transforms.4.1.gate')),
+        ('cc_scale_transforms.4.4.mask', PruneHelper('normal', 'cc_scale_transforms.4.3.weight', 'cc_scale_transforms.4.3.bias', ['cc_scale_transforms.4.6.weight'], 'cc_scale_transforms.4.4.gate')),
+        ('cc_scale_transforms.5.1.mask', PruneHelper('normal', 'cc_scale_transforms.5.0.weight', 'cc_scale_transforms.5.0.bias', ['cc_scale_transforms.5.3.weight'], 'cc_scale_transforms.5.1.gate')),
+        ('cc_scale_transforms.5.4.mask', PruneHelper('normal', 'cc_scale_transforms.5.3.weight', 'cc_scale_transforms.5.3.bias', ['cc_scale_transforms.5.6.weight'], 'cc_scale_transforms.5.4.gate')),
+        ('cc_scale_transforms.6.1.mask', PruneHelper('normal', 'cc_scale_transforms.6.0.weight', 'cc_scale_transforms.6.0.bias', ['cc_scale_transforms.6.3.weight'], 'cc_scale_transforms.6.1.gate')),
+        ('cc_scale_transforms.6.4.mask', PruneHelper('normal', 'cc_scale_transforms.6.3.weight', 'cc_scale_transforms.6.3.bias', ['cc_scale_transforms.6.6.weight'], 'cc_scale_transforms.6.4.gate')),
+        ('cc_scale_transforms.7.1.mask', PruneHelper('normal', 'cc_scale_transforms.7.0.weight', 'cc_scale_transforms.7.0.bias', ['cc_scale_transforms.7.3.weight'], 'cc_scale_transforms.7.1.gate')),
+        ('cc_scale_transforms.7.4.mask', PruneHelper('normal', 'cc_scale_transforms.7.3.weight', 'cc_scale_transforms.7.3.bias', ['cc_scale_transforms.7.6.weight'], 'cc_scale_transforms.7.4.gate')),
+        ('cc_scale_transforms.8.1.mask', PruneHelper('normal', 'cc_scale_transforms.8.0.weight', 'cc_scale_transforms.8.0.bias', ['cc_scale_transforms.8.3.weight'], 'cc_scale_transforms.8.1.gate')),
+        ('cc_scale_transforms.8.4.mask', PruneHelper('normal', 'cc_scale_transforms.8.3.weight', 'cc_scale_transforms.8.3.bias', ['cc_scale_transforms.8.6.weight'], 'cc_scale_transforms.8.4.gate')),
+        ('cc_scale_transforms.9.1.mask', PruneHelper('normal', 'cc_scale_transforms.9.0.weight', 'cc_scale_transforms.9.0.bias', ['cc_scale_transforms.9.3.weight'], 'cc_scale_transforms.9.1.gate')),
+        ('cc_scale_transforms.9.4.mask', PruneHelper('normal', 'cc_scale_transforms.9.3.weight', 'cc_scale_transforms.9.3.bias', ['cc_scale_transforms.9.6.weight'], 'cc_scale_transforms.9.4.gate')),
+        ('lrp_transforms.0.1.mask', PruneHelper('normal', 'lrp_transforms.0.0.weight', 'lrp_transforms.0.0.bias', ['lrp_transforms.0.3.weight'], 'lrp_transforms.0.1.gate')),
+        ('lrp_transforms.0.4.mask', PruneHelper('normal', 'lrp_transforms.0.3.weight', 'lrp_transforms.0.3.bias', ['lrp_transforms.0.6.weight'], 'lrp_transforms.0.4.gate')),
+        ('lrp_transforms.1.1.mask', PruneHelper('normal', 'lrp_transforms.1.0.weight', 'lrp_transforms.1.0.bias', ['lrp_transforms.1.3.weight'], 'lrp_transforms.1.1.gate')),
+        ('lrp_transforms.1.4.mask', PruneHelper('normal', 'lrp_transforms.1.3.weight', 'lrp_transforms.1.3.bias', ['lrp_transforms.1.6.weight'], 'lrp_transforms.1.4.gate')),
+        ('lrp_transforms.2.1.mask', PruneHelper('normal', 'lrp_transforms.2.0.weight', 'lrp_transforms.2.0.bias', ['lrp_transforms.2.3.weight'], 'lrp_transforms.2.1.gate')),
+        ('lrp_transforms.2.4.mask', PruneHelper('normal', 'lrp_transforms.2.3.weight', 'lrp_transforms.2.3.bias', ['lrp_transforms.2.6.weight'], 'lrp_transforms.2.4.gate')),
+        ('lrp_transforms.3.1.mask', PruneHelper('normal', 'lrp_transforms.3.0.weight', 'lrp_transforms.3.0.bias', ['lrp_transforms.3.3.weight'], 'lrp_transforms.3.1.gate')),
+        ('lrp_transforms.3.4.mask', PruneHelper('normal', 'lrp_transforms.3.3.weight', 'lrp_transforms.3.3.bias', ['lrp_transforms.3.6.weight'], 'lrp_transforms.3.4.gate')),
+        ('lrp_transforms.4.1.mask', PruneHelper('normal', 'lrp_transforms.4.0.weight', 'lrp_transforms.4.0.bias', ['lrp_transforms.4.3.weight'], 'lrp_transforms.4.1.gate')),
+        ('lrp_transforms.4.4.mask', PruneHelper('normal', 'lrp_transforms.4.3.weight', 'lrp_transforms.4.3.bias', ['lrp_transforms.4.6.weight'], 'lrp_transforms.4.4.gate')),
+        ('lrp_transforms.5.1.mask', PruneHelper('normal', 'lrp_transforms.5.0.weight', 'lrp_transforms.5.0.bias', ['lrp_transforms.5.3.weight'], 'lrp_transforms.5.1.gate')),
+        ('lrp_transforms.5.4.mask', PruneHelper('normal', 'lrp_transforms.5.3.weight', 'lrp_transforms.5.3.bias', ['lrp_transforms.5.6.weight'], 'lrp_transforms.5.4.gate')),
+        ('lrp_transforms.6.1.mask', PruneHelper('normal', 'lrp_transforms.6.0.weight', 'lrp_transforms.6.0.bias', ['lrp_transforms.6.3.weight'], 'lrp_transforms.6.1.gate')),
+        ('lrp_transforms.6.4.mask', PruneHelper('normal', 'lrp_transforms.6.3.weight', 'lrp_transforms.6.3.bias', ['lrp_transforms.6.6.weight'], 'lrp_transforms.6.4.gate')),
+        ('lrp_transforms.7.1.mask', PruneHelper('normal', 'lrp_transforms.7.0.weight', 'lrp_transforms.7.0.bias', ['lrp_transforms.7.3.weight'], 'lrp_transforms.7.1.gate')),
+        ('lrp_transforms.7.4.mask', PruneHelper('normal', 'lrp_transforms.7.3.weight', 'lrp_transforms.7.3.bias', ['lrp_transforms.7.6.weight'], 'lrp_transforms.7.4.gate')),
+        ('lrp_transforms.8.1.mask', PruneHelper('normal', 'lrp_transforms.8.0.weight', 'lrp_transforms.8.0.bias', ['lrp_transforms.8.3.weight'], 'lrp_transforms.8.1.gate')),
+        ('lrp_transforms.8.4.mask', PruneHelper('normal', 'lrp_transforms.8.3.weight', 'lrp_transforms.8.3.bias', ['lrp_transforms.8.6.weight'], 'lrp_transforms.8.4.gate')),
+        ('lrp_transforms.9.1.mask', PruneHelper('normal', 'lrp_transforms.9.0.weight', 'lrp_transforms.9.0.bias', ['lrp_transforms.9.3.weight'], 'lrp_transforms.9.1.gate')),
+        ('lrp_transforms.9.4.mask', PruneHelper('normal', 'lrp_transforms.9.3.weight', 'lrp_transforms.9.3.bias', ['lrp_transforms.9.6.weight'], 'lrp_transforms.9.4.gate')),
+        ])
+
+    to_be_pop = [
+        'h_a.1.gate', 'h_a.1.score',
+        'h_a.4.gate', 'h_a.4.score',
+        'h_a.7.gate', 'h_a.7.score',
+        'h_mean_s.1.gate', 'h_mean_s.1.score',
+        'h_mean_s.4.gate', 'h_mean_s.4.score',
+        'h_mean_s.7.gate', 'h_mean_s.7.score',
+        'h_scale_s.1.gate', 'h_scale_s.1.score',
+        'h_scale_s.4.gate', 'h_scale_s.4.score',
+        'h_scale_s.7.gate', 'h_scale_s.7.score',
+        'cc_mean_transforms.0.1.gate', 'cc_mean_transforms.0.1.score',
+        'cc_mean_transforms.0.4.gate', 'cc_mean_transforms.0.4.score',
+        'cc_mean_transforms.1.1.gate', 'cc_mean_transforms.1.1.score',
+        'cc_mean_transforms.1.4.gate', 'cc_mean_transforms.1.4.score',
+        'cc_mean_transforms.2.1.gate', 'cc_mean_transforms.2.1.score',
+        'cc_mean_transforms.2.4.gate', 'cc_mean_transforms.2.4.score',
+        'cc_mean_transforms.3.1.gate', 'cc_mean_transforms.3.1.score',
+        'cc_mean_transforms.3.4.gate', 'cc_mean_transforms.3.4.score',
+        'cc_mean_transforms.4.1.gate', 'cc_mean_transforms.4.1.score',
+        'cc_mean_transforms.4.4.gate', 'cc_mean_transforms.4.4.score',
+        'cc_mean_transforms.5.1.gate', 'cc_mean_transforms.5.1.score',
+        'cc_mean_transforms.5.4.gate', 'cc_mean_transforms.5.4.score',
+        'cc_mean_transforms.6.1.gate', 'cc_mean_transforms.6.1.score',
+        'cc_mean_transforms.6.4.gate', 'cc_mean_transforms.6.4.score',
+        'cc_mean_transforms.7.1.gate', 'cc_mean_transforms.7.1.score',
+        'cc_mean_transforms.7.4.gate', 'cc_mean_transforms.7.4.score',
+        'cc_mean_transforms.8.1.gate', 'cc_mean_transforms.8.1.score',
+        'cc_mean_transforms.8.4.gate', 'cc_mean_transforms.8.4.score',
+        'cc_mean_transforms.9.1.gate', 'cc_mean_transforms.9.1.score',
+        'cc_mean_transforms.9.4.gate', 'cc_mean_transforms.9.4.score',
+        'cc_scale_transforms.0.1.gate', 'cc_scale_transforms.0.1.score',
+        'cc_scale_transforms.0.4.gate', 'cc_scale_transforms.0.4.score',
+        'cc_scale_transforms.1.1.gate', 'cc_scale_transforms.1.1.score',
+        'cc_scale_transforms.1.4.gate', 'cc_scale_transforms.1.4.score',
+        'cc_scale_transforms.2.1.gate', 'cc_scale_transforms.2.1.score',
+        'cc_scale_transforms.2.4.gate', 'cc_scale_transforms.2.4.score',
+        'cc_scale_transforms.3.1.gate', 'cc_scale_transforms.3.1.score',
+        'cc_scale_transforms.3.4.gate', 'cc_scale_transforms.3.4.score',
+        'cc_scale_transforms.4.1.gate', 'cc_scale_transforms.4.1.score',
+        'cc_scale_transforms.4.4.gate', 'cc_scale_transforms.4.4.score',
+        'cc_scale_transforms.5.1.gate', 'cc_scale_transforms.5.1.score',
+        'cc_scale_transforms.5.4.gate', 'cc_scale_transforms.5.4.score',
+        'cc_scale_transforms.6.1.gate', 'cc_scale_transforms.6.1.score',
+        'cc_scale_transforms.6.4.gate', 'cc_scale_transforms.6.4.score',
+        'cc_scale_transforms.7.1.gate', 'cc_scale_transforms.7.1.score',
+        'cc_scale_transforms.7.4.gate', 'cc_scale_transforms.7.4.score',
+        'cc_scale_transforms.8.1.gate', 'cc_scale_transforms.8.1.score',
+        'cc_scale_transforms.8.4.gate', 'cc_scale_transforms.8.4.score',
+        'cc_scale_transforms.9.1.gate', 'cc_scale_transforms.9.1.score',
+        'cc_scale_transforms.9.4.gate', 'cc_scale_transforms.9.4.score',
+        'lrp_transforms.0.1.gate', 'lrp_transforms.0.1.score',
+        'lrp_transforms.0.4.gate', 'lrp_transforms.0.4.score',
+        'lrp_transforms.1.1.gate', 'lrp_transforms.1.1.score',
+        'lrp_transforms.1.4.gate', 'lrp_transforms.1.4.score',
+        'lrp_transforms.2.1.gate', 'lrp_transforms.2.1.score',
+        'lrp_transforms.2.4.gate', 'lrp_transforms.2.4.score',
+        'lrp_transforms.3.1.gate', 'lrp_transforms.3.1.score',
+        'lrp_transforms.3.4.gate', 'lrp_transforms.3.4.score',
+        'lrp_transforms.4.1.gate', 'lrp_transforms.4.1.score',
+        'lrp_transforms.4.4.gate', 'lrp_transforms.4.4.score',
+        'lrp_transforms.5.1.gate', 'lrp_transforms.5.1.score',
+        'lrp_transforms.5.4.gate', 'lrp_transforms.5.4.score',
+        'lrp_transforms.6.1.gate', 'lrp_transforms.6.1.score',
+        'lrp_transforms.6.4.gate', 'lrp_transforms.6.4.score',
+        'lrp_transforms.7.1.gate', 'lrp_transforms.7.1.score',
+        'lrp_transforms.7.4.gate', 'lrp_transforms.7.4.score',
+        'lrp_transforms.8.1.gate', 'lrp_transforms.8.1.score',
+        'lrp_transforms.8.4.gate', 'lrp_transforms.8.4.score',
+        'lrp_transforms.9.1.gate', 'lrp_transforms.9.1.score',
+        'lrp_transforms.9.4.gate', 'lrp_transforms.9.4.score',
+        ]
 
 
 class GateDecorator(nn.Module):
