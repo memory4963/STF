@@ -234,7 +234,7 @@ def parse_args(argv):
         "-n",
         "--num-workers",
         type=int,
-        default=30,
+        default=8,
         help="Dataloaders threads (default: %(default)s)",
     )
     parser.add_argument(
@@ -364,8 +364,9 @@ def main(argv):
         net_without_ddp = net.module
 
     optimizer, aux_optimizer = configure_optimizers(net, args)
-    lr_scheduler = optim.lr_scheduler.MultiStepLR(optimizer, [320, 345])
-    criterion = RateDistortionLoss(lmbda=args.lmbda)
+    # CC的settings # by LUO
+    lr_scheduler = optim.lr_scheduler.MultiStepLR(optimizer, [60, 72, 84, 96], gamma=1/3)
+    criterion = RateDistortionLoss()
 
     last_epoch = 0
     if args.checkpoint:  # load from previous checkpoint
@@ -381,6 +382,12 @@ def main(argv):
 
     best_loss = float("inf")
     for epoch in range(last_epoch, args.epochs):
+        # CC中是这么做的 # by LUO
+        if epoch < args.epochs // 2:
+            criterion.lmbda = 2*args.lmbda
+        else:
+            criterion.lmbda = args.lmbda
+
         if utils.is_main_process():
             print(f"Learning rate: {optimizer.param_groups[0]['lr']}")
         train_one_epoch(
