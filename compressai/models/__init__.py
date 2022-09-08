@@ -18,3 +18,4 @@ from .cnn import WACNN
 from .tbc import TransformerBasedCoding
 from .dystf import DYSTF
 from .CC import CC
+from .CC_gd import CC_GD
