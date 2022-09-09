@@ -372,7 +372,7 @@ def main(argv):
     criterion = RateDistortionLoss()
 
     last_epoch = 0
-    if args.checkpoint:  # load from previous checkpoint
+    if args.checkpoint and os.path.exists(args.checkpoint):  # load from previous checkpoint
         if utils.is_main_process():
             print("Loading", args.checkpoint)
         checkpoint = torch.load(args.checkpoint, map_location=device)
