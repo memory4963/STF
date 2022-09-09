@@ -13,7 +13,7 @@
 # limitations under the License.
 
 
-from compressai.models import CC_GD, SymmetricalTransFormer, WACNN, TransformerBasedCoding, DYSTF, CC
+from compressai.models import CC_uneven, CC_GD, SymmetricalTransFormer, WACNN, TransformerBasedCoding, DYSTF, CC
 
 from .pretrained import load_pretrained as load_state_dict
 
@@ -23,5 +23,6 @@ models = {
     'tbc': TransformerBasedCoding,
     'dystf': DYSTF,
     'cc': CC,
+    'cc_uneven': CC_uneven,
     'cc_gd': CC_GD,
 }

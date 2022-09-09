@@ -127,7 +127,7 @@ class CC(CompressionModel):
         latent_scales = self.h_scale_s(z_hat)
         latent_means = self.h_mean_s(z_hat)
 
-        y_slices = y.chunk(self.num_slices, 1)
+        y_slices = self.split_slices(y)
         y_hat_slices = []
         y_likelihood = []
 
@@ -160,6 +160,9 @@ class CC(CompressionModel):
             "x_hat": x_hat,
             "likelihoods": {"y": y_likelihoods, "z": z_likelihoods},
         }
+    
+    def split_slices(self, y):
+        return y.chunk(self.num_slices, 1)
 
     def load_state_dict(self, state_dict):
         update_registered_buffers(
@@ -303,3 +306,39 @@ class CC(CompressionModel):
         x_hat = self.g_s(y_hat).clamp_(0, 1)
 
         return {"x_hat": x_hat}
+
+
+class CC_uneven(CC):
+    def __init__(self, N=192, M=320, num_slices=5, max_support_slices=-1, slices=[10,20,40,80,170], **kwargs):
+        super().__init__(N, M, num_slices, max_support_slices, **kwargs)
+        self.slices = slices
+        self.cc_mean_transforms = nn.ModuleList(
+            nn.Sequential(
+                conv3x3(320 + sum(self.slices[:i]), 224 + sum(self.slices[:i])*2//3),
+                nn.ReLU(),
+                conv3x3(224 + sum(self.slices[:i])*2//3, 128 + sum(self.slices[:i])*1//3),
+                nn.ReLU(),
+                conv3x3(128 + sum(self.slices[:i])*1//3, self.slices[i]),
+            ) for i in range(self.num_slices)
+        )
+        self.cc_scale_transforms = nn.ModuleList(
+            nn.Sequential(
+                conv3x3(320 + sum(self.slices[:i]), 224 + sum(self.slices[:i])*2//3),
+                nn.ReLU(),
+                conv3x3(224 + sum(self.slices[:i])*2//3, 128 + sum(self.slices[:i])*1//3),
+                nn.ReLU(),
+                conv3x3(128 + sum(self.slices[:i])*1//3, self.slices[i]),
+            ) for i in range(self.num_slices)
+            )
+        self.lrp_transforms = nn.ModuleList(
+            nn.Sequential(
+                conv3x3(320 + sum(self.slices[:i]) + self.slices[i], 224 + sum(self.slices[:i])*2//3),
+                nn.ReLU(),
+                conv3x3(224 + sum(self.slices[:i])*2//3, 128 + sum(self.slices[:i])*1//3),
+                nn.ReLU(),
+                conv3x3(128 + sum(self.slices[:i])*1//3, self.slices[i]),
+            ) for i in range(self.num_slices)
+        )
+
+    def split_slices(self, y):
+        return y.split(self.slices, dim=1)
