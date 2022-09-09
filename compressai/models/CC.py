@@ -23,10 +23,10 @@ def get_scale_table(min=SCALES_MIN, max=SCALES_MAX, levels=SCALES_LEVELS):
 class CC(CompressionModel):
     """Channel-wise Context model"""
 
-    def __init__(self, N=192, M=320, **kwargs):
+    def __init__(self, N=192, M=320, num_slices=10, max_support_slices=-1, **kwargs):
         super().__init__(**kwargs)
-        self.num_slices = 10
-        self.max_support_slices = 5
+        self.num_slices = num_slices
+        self.max_support_slices = max_support_slices
 
         self.g_a = nn.Sequential(
             conv(3, N),
@@ -73,30 +73,30 @@ class CC(CompressionModel):
         )
         self.cc_mean_transforms = nn.ModuleList(
             nn.Sequential(
-                conv3x3(320 + 32*min(i, 5), 224),
+                conv3x3(320 + 320//self.num_slices*i, 224 + 320//self.num_slices*i*2//3),
                 nn.ReLU(),
-                conv3x3(224, 128),
+                conv3x3(224 + 320//self.num_slices*i*2//3, 128 + 320//self.num_slices*i*1//3),
                 nn.ReLU(),
-                conv3x3(128, 32),
-            ) for i in range(10)
+                conv3x3(128 + 320//self.num_slices*i*1//3, 320//self.num_slices),
+            ) for i in range(self.num_slices)
         )
         self.cc_scale_transforms = nn.ModuleList(
             nn.Sequential(
-                conv3x3(320 + 32*min(i, 5), 224),
+                conv3x3(320 + 320//self.num_slices*i, 224 + 320//self.num_slices*i*2//3),
                 nn.ReLU(),
-                conv3x3(224, 128),
+                conv3x3(224 + 320//self.num_slices*i*2//3, 128 + 320//self.num_slices*i*1//3),
                 nn.ReLU(),
-                conv3x3(128, 32),
-            ) for i in range(10)
+                conv3x3(128 + 320//self.num_slices*i*1//3, 320//self.num_slices),
+            ) for i in range(self.num_slices)
             )
         self.lrp_transforms = nn.ModuleList(
             nn.Sequential(
-                conv3x3(320 + 32*min(i+1, 6), 224),
+                conv3x3(320 + 320//self.num_slices*(i+1), 224 + 320//self.num_slices*i*2//3),
                 nn.ReLU(),
-                conv3x3(224, 128),
+                conv3x3(224 + 320//self.num_slices*i*2//3, 128 + 320//self.num_slices*i*1//3),
                 nn.ReLU(),
-                conv3x3(128, 32),
-            ) for i in range(10)
+                conv3x3(128 + 320//self.num_slices*i*1//3, 320//self.num_slices),
+            ) for i in range(self.num_slices)
         )
 
         self.entropy_bottleneck = EntropyBottleneck(N)

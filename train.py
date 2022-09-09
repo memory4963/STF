@@ -248,6 +248,9 @@ def parse_args(argv):
         "--batch-size", type=int, default=16, help="Batch size (default: %(default)s)"
     )
     parser.add_argument(
+        "--num_slices", type=int, default=10, help="Num Slices (default: %(default)s)"
+    )
+    parser.add_argument(
         "--test-batch-size",
         type=int,
         default=64,
@@ -355,7 +358,7 @@ def main(argv):
             pin_memory=(device == "cuda"),
         )
 
-    net = models[args.model]()
+    net = models[args.model](num_slices=args.num_slices)
     net = net.to(device)
 
     net_without_ddp = net
