@@ -342,3 +342,107 @@ class CC_uneven(CC):
 
     def split_slices(self, y):
         return y.split(self.slices, dim=1)
+
+
+class CC_RandomSplit(CC):
+    """Channel-wise Context model"""
+
+    def __init__(self, N=192, M=320, **kwargs):
+        super().__init__(N, M, **kwargs)
+        # TODO 第一个slice也过transform
+        self.cc_mean_transforms = nn.ModuleList(
+            [nn.Sequential(
+                conv3x3(320, 224),
+                nn.ReLU(),
+                conv3x3(224, 128),
+                nn.ReLU(),
+                conv3x3(128, 320),
+            ), nn.Sequential(
+                conv3x3(320 + 320, 224 + 320*2//3),
+                nn.ReLU(),
+                conv3x3(224 + 320*2//3, 128 + 320*1//3),
+                nn.ReLU(),
+                conv3x3(128 + 320*1//3, 320),
+            )]
+        )
+        self.cc_scale_transforms = nn.ModuleList(
+            [nn.Sequential(
+                conv3x3(320, 224),
+                nn.ReLU(),
+                conv3x3(224, 128),
+                nn.ReLU(),
+                conv3x3(128, 320),
+            ), nn.Sequential(
+                conv3x3(320 + 320, 224 + 320*2//3),
+                nn.ReLU(),
+                conv3x3(224 + 320*2//3, 128 + 320*1//3),
+                nn.ReLU(),
+                conv3x3(128 + 320*1//3, 320),
+            )]
+        )
+        self.lrp_transforms = nn.ModuleList(
+            [nn.Sequential(
+                conv3x3(320 + 320, 224),
+                nn.ReLU(),
+                conv3x3(224, 128),
+                nn.ReLU(),
+                conv3x3(128, 320),
+            ), nn.Sequential(
+                conv3x3(320 + 320 + 320, 224 + 320*2//3),
+                nn.ReLU(),
+                conv3x3(224 + 320*2//3, 128 + 320*1//3),
+                nn.ReLU(),
+                conv3x3(128 + 320*1//3, 320),
+        )]
+        )
+
+
+    def forward(self, x, split_pos):
+        y = self.g_a(x)
+        y_shape = y.shape[2:]
+        z = self.h_a(y)
+        _, z_likelihoods = self.entropy_bottleneck(z)
+
+        # Use rounding (instead of uniform noise) to modify z before passing it
+        # to the hyper-synthesis transforms. Note that quantize() overrides the
+        # gradient to create a straight-through estimator.
+        z_offset = self.entropy_bottleneck._get_medians()
+        z_tmp = z - z_offset
+        z_hat = ste_round(z_tmp) + z_offset
+
+        latent_scales = self.h_scale_s(z_hat)
+        latent_means = self.h_mean_s(z_hat)
+
+        anchor_means = self.cc_mean_transforms[0](latent_means)
+        anchor_scales = self.cc_scale_transforms[0](latent_scales)
+
+        _, y_hat_anchor_likelihood = self.gaussian_conditional(y[:, :split_pos], anchor_scales[:, :split_pos], anchor_means[:, :split_pos]) 
+        y_hat_anchor = ste_round(y[:, :split_pos] - anchor_means[:, :split_pos]) + anchor_means[:, :split_pos]
+        anchor_slice = torch.zeros_like(latent_means)
+        anchor_slice[:, :split_pos] = y_hat_anchor
+        anchor_lrp = self.lrp_transforms[0](torch.cat((latent_means, anchor_slice), dim=1))
+        y_hat_anchor += 0.5 * torch.tanh(anchor_lrp[:, :split_pos])
+
+        support_slice = torch.zeros_like(latent_means)
+        support_slice[:, :split_pos] = y_hat_anchor
+        nonanchor_means = self.cc_mean_transforms[1](torch.cat((latent_means, support_slice), dim=1))
+        nonanchor_scales = self.cc_scale_transforms[1](torch.cat((latent_means, support_slice), dim=1))
+
+        _, y_hat_nonanchor_likelihood = self.gaussian_conditional(y[:, split_pos:], nonanchor_scales[:, split_pos:], nonanchor_means[:, split_pos:])
+        y_hat_nonanchor = ste_round(y[:, split_pos:] - nonanchor_means[:, split_pos:]) + nonanchor_means[:, split_pos:]
+
+        y_hat_nonanchor_fullchannel = torch.zeros_like(latent_means)
+        y_hat_nonanchor_fullchannel[:, split_pos:] = y_hat_nonanchor
+        lrp = self.lrp_transforms[1](torch.cat((latent_means, support_slice, y_hat_nonanchor_fullchannel), dim=1))
+        lrp = 0.5 * torch.tanh(lrp)
+        y_hat_nonanchor_fullchannel += lrp
+        y_hat_nonanchor = y_hat_nonanchor_fullchannel[:, split_pos:]
+
+        y_hat = torch.cat((y_hat_anchor, y_hat_nonanchor), dim=1)
+        y_likelihoods = torch.cat((y_hat_anchor_likelihood, y_hat_nonanchor_likelihood), dim=1)
+        x_hat = self.g_s(y_hat)
+
+        return {
+            "x_hat": x_hat,
+            "likelihoods": {"y": y_likelihoods, "z": z_likelihoods},
+        }
