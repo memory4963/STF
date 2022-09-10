@@ -178,7 +178,7 @@ def test_epoch(epoch, test_dataloader, model, criterion):
     with torch.no_grad():
         for d in test_dataloader:
             d = d.to(device)
-            out_net = model(d)
+            out_net = model(d, 160)
             out_criterion = criterion(out_net, d)
 
             aux_loss.update(model.aux_loss())
