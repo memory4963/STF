@@ -398,6 +398,9 @@ class CC_RandomSplit(CC):
 
 
     def forward(self, x, split_pos):
+        return self.train_forward if split_pos is int else self.eval_forward(x, split_pos)
+    
+    def train_forward(self, x, split_pos):
         y = self.g_a(x)
         y_shape = y.shape[2:]
         z = self.h_a(y)
@@ -446,3 +449,76 @@ class CC_RandomSplit(CC):
             "x_hat": x_hat,
             "likelihoods": {"y": y_likelihoods, "z": z_likelihoods},
         }
+
+    def eval_forward(self, x, split_pos):
+        self.slices = split_pos + [320]
+
+        y = self.g_a(x)
+        y_shape = y.shape[2:]
+        z = self.h_a(y)
+        _, z_likelihoods = self.entropy_bottleneck(z)
+
+        # Use rounding (instead of uniform noise) to modify z before passing it
+        # to the hyper-synthesis transforms. Note that quantize() overrides the
+        # gradient to create a straight-through estimator.
+        z_offset = self.entropy_bottleneck._get_medians()
+        z_tmp = z - z_offset
+        z_hat = ste_round(z_tmp) + z_offset
+
+        latent_scales = self.h_scale_s(z_hat)
+        latent_means = self.h_mean_s(z_hat)
+
+        y_slices = self.split_slices(y)
+        y_hat_slices = []
+        y_likelihood = []
+
+        anchor_means = self.cc_mean_transforms[0](latent_means)
+        anchor_scales = self.cc_scale_transforms[0](latent_scales)
+
+        _, y_hat_anchor_likelihood = self.gaussian_conditional(y[:, :self.slices[0]], anchor_scales[:, :self.slices[0]], anchor_means[:, :self.slices[0]]) 
+        y_likelihood.append(y_hat_anchor_likelihood)
+        y_hat_anchor = ste_round(y[:, :self.slices[0]] - anchor_means[:, :self.slices[0]]) + anchor_means[:, :self.slices[0]]
+        anchor_slice = torch.zeros_like(latent_means)
+        anchor_slice[:, :self.slices[0]] = y_hat_anchor
+        anchor_lrp = self.lrp_transforms[0](torch.cat((latent_means, anchor_slice), dim=1))
+        y_hat_anchor += 0.5 * torch.tanh(anchor_lrp[:, :self.slices[0]])
+        y_hat_slices.append(y_hat_anchor)
+
+        for slice_index, y_slice in enumerate(y_slices[1:]):
+            support_slices = y_hat_slices
+            support_slices = torch.zeros_like(latent_means)
+            support_slices[:, :self.slices[slice_index]] = torch.cat(y_hat_slices, dim=1)
+            mean_support = torch.cat([latent_means, support_slices], dim=1)
+            mu = self.cc_mean_transforms[1](mean_support)
+            mu = mu[:, self.slices[slice_index]:self.slices[slice_index+1]]
+
+            scale_support = torch.cat([latent_scales, support_slices], dim=1)
+            scale = self.cc_scale_transforms[1](scale_support)
+            scale = scale[:, self.slices[slice_index]:self.slices[slice_index+1]]
+
+            _, y_slice_likelihood = self.gaussian_conditional(y_slice, scale, mu)
+            y_likelihood.append(y_slice_likelihood)
+            y_hat_slice = ste_round(y_slice - mu) + mu
+
+            y_hat_slice_full = torch.zeros_like(latent_means)
+            y_hat_slice_full[:, self.slices[slice_index]:self.slices[slice_index+1]] = y_hat_slice
+            lrp_support = torch.cat([mean_support, y_hat_slice_full], dim=1)
+            lrp = self.lrp_transforms[1](lrp_support)[:, self.slices[slice_index]:self.slices[slice_index+1]]
+            lrp = 0.5 * torch.tanh(lrp)
+            y_hat_slice += lrp
+
+            y_hat_slices.append(y_hat_slice)
+
+        y_hat = torch.cat(y_hat_slices, dim=1)
+        y_likelihoods = torch.cat(y_likelihood, dim=1)
+        x_hat = self.g_s(y_hat)
+
+        return {
+            "x_hat": x_hat,
+            "likelihoods": {"y": y_likelihoods, "z": z_likelihoods},
+        }
+
+    def split_slices(self, y):
+        splits = [self.slices[0]]
+        splits += [self.slices[i+1]-self.slices[i] for i in range(len(self.slices)-1)]
+        return y.split(splits, dim=1)
