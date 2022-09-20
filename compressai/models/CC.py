@@ -639,10 +639,10 @@ class CCResRep(CC):
             [(self.lrp_transforms[i][2][1],) for i in range(self.num_slices)]
 
     def forward(self, x):
-        y = self.g_a(x)
+        ori_y = self.g_a(x)
+        y = torch.zeros_like(ori_y)
         for i in range(self.num_slices):
-            y[:, i*self.slice_size:(i+1)*self.slice_size] = self.y_compactors[i](y[:, i*self.slice_size:(i+1)*self.slice_size])
-        # y_shape = y.shape[2:]
+            y[:, i*self.slice_size:(i+1)*self.slice_size] = self.y_compactors[i](ori_y[:, i*self.slice_size:(i+1)*self.slice_size])
         z = self.h_a(y)
         _, z_likelihoods = self.entropy_bottleneck(z)
 
