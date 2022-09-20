@@ -322,6 +322,7 @@ def parse_args(argv):
     parser.add_argument("--num_per_mask", type=int, default=20, help="channels to prune each time")
     parser.add_argument("--lasso_strength", type=float, default=1e-9, help="penalty of lasso")
     parser.add_argument("--least_remain_channel", type=int, default=5, help="least remaining channel of each layer")
+    parser.add_argument("--threshold", type=float, default=1e-5, help="penalty of lasso")
 
     parser.add_argument('--world_size', default=1, type=int, help='number of distributed processes')
     parser.add_argument("--local_rank", default=0, type=int)
@@ -438,6 +439,10 @@ def main(argv):
         start_time = time()
         pre_step = -1
 
+        # debug
+        # pruned_save_name = args.save_path[:-8] + '_pruned_' + str(epoch) + args.save_path[-8:]
+        # save_checkpoint(rr_utils.cc_model_prune(model, ori_deps, args.threshold), pruned_save_name)
+
         for i, d in enumerate(train_dataloader):
             resrep_step = step - args.resrep_warmup_step
             if resrep_step > 0 and resrep_step % args.mask_interval == 0:
@@ -488,7 +493,7 @@ def main(argv):
                     },
                     save_name
                 )
-                save_checkpoint(rr_utils.cc_model_prune(model, ori_deps), pruned_save_name)
+                save_checkpoint(rr_utils.cc_model_prune(model, ori_deps, args.threshold), pruned_save_name)
         if args.distributed:
             dist.barrier()
 

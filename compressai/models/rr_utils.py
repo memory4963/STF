@@ -31,8 +31,7 @@ def already_masked(compactor: CompactorLayer, k):
     return compactor.mask[k] == 0
 
 
-def cc_model_prune(model, ori_deps, thresh, succ_strategy, num_at_least,
-                            flops_func, key_table, bottle_neck_id=2, hyper_last=5):
+def cc_model_prune(model, ori_deps, thresh):
     table = model.suc_table
     num_slices = model.num_slices
     already_pruned_suc = set()
@@ -46,7 +45,6 @@ def cc_model_prune(model, ori_deps, thresh, succ_strategy, num_at_least,
 
     cur_state_dict = model.state_dict()
     save_dict = {}
-    convert_layers = {}
     for k, v in cur_state_dict.items():
         v = v.detach().cpu()
         save_dict[k] = v
@@ -54,27 +52,19 @@ def cc_model_prune(model, ori_deps, thresh, succ_strategy, num_at_least,
 
     for k, v in table.items():
         compactor = save_dict[k+'.pwc.weight']
-        # if v['type'] == 'partial':
-        #     weight = save_dict[v['weight']+ '_{}_{}'.format(*v['ch'])]
-        #     bias = save_dict[v['bias']+ '_{}_{}'.format(*v['ch'])]
-        #     pruned_weight, pruned_bias, survived_ids = fold_conv(weight, bias, thresh, compactor, not v['conv'])
-        #     if pruned_weight.shape == weight.shape:
-        #         # not pruned, no need to change suc_weight
-        #         continue
 
         if v['type'] == 'split':
-            for i in range(num_slices):
-                weight_name = v['weight'] + '_{}_{}'.format(i*320//num_slices, (i+1)*320//num_slices)
-                bias_name = v['bias'] + '_{}_{}'.format(i*320//num_slices, (i+1)*320//num_slices)
-                weight = save_dict[weight_name]
-                bias = save_dict[bias_name]
-                pruned_weight, pruned_bias, survived_ids = fold_conv(weight, bias, thresh, compactor, not v['conv'])
-                save_dict[weight_name] = pruned_weight
-                save_dict[bias_name] = pruned_bias
+            for k in save_dict:
+                if v['weight'] not in k:
+                    continue
+                weight = save_dict[k]
+                pruned_weight, pruned_bias, survived_ids = fold_conv(weight, None, thresh, compactor, not v['conv'])
+                save_dict[k] = pruned_weight
+            save_dict[v['bias']] = save_dict[v['bias']][survived_ids.long()]
         else:
             if v['type'] == 'partial':
-                weight_name = v['weight'] + '_{}_{}'.format(*v['ch'])
-                bias_name = v['bias'] + '_{}_{}'.format(*v['ch'])
+                weight_name = v['weight'] + '_{}_{}'.format(*v['ch'][0])
+                bias_name = v['bias'] + '_{}_{}'.format(*v['ch'][0])
             else:
                 weight_name = v['weight']
                 bias_name = v['bias']
@@ -95,13 +85,15 @@ def cc_model_prune(model, ori_deps, thresh, succ_strategy, num_at_least,
             continue
         
         for i, suc_weight_name in enumerate(v['suc_weight']):
-            if v['type'] == 'suc_partial' or v['type'] == 'partial':
-                suc_weight_name += '_{}_{}'.format(*v['ch'])
+            if v['type'] == 'suc_partial':
+                suc_weight_name += '_{}_{}'.format(*v['ch'][i])
+            if v['type'] == 'partial':
+                suc_weight_name += '_{}_{}'.format(*v['ch'][i+1])
             if suc_weight_name in already_pruned_suc:
                 continue
             already_pruned_suc.add(suc_weight_name)
             suc_weight = save_dict[suc_weight_name]
-            if v['suc_conv']:
+            if v['suc_conv'][i]:
                 suc_weight = suc_weight[:, survived_ids.long()]
             else:
                 suc_weight = suc_weight[survived_ids.long()]
@@ -166,8 +158,11 @@ def fold_conv(fused_k, fused_b, thresh, compactor_mat, deconv=False):
     #                 continue
     #             bias = torch.cat((bias, fused_b[k::4].dot(compactor_mat[j,:,0,0])[True]), 0)
     # else:
-    bias = torch.zeros(Dprime)
-    for i in range(Dprime):
-        bias[i] = fused_b.dot(compactor_mat[i,:,0,0])
+    if fused_b is not None:
+        bias = torch.zeros(Dprime)
+        for i in range(Dprime):
+            bias[i] = fused_b.dot(compactor_mat[i,:,0,0])
+    else:
+        bias = None
 
     return kernel, bias, filter_ids_higher_thresh

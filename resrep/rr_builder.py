@@ -68,6 +68,10 @@ class CompactorLayer(nn.Module):
         self.pwc = nn.Conv2d(in_channels=num_features, out_channels=num_features, kernel_size=1,
                           stride=1, padding=0, bias=False)
         identity_mat = np.eye(num_features, dtype=np.float32)
+
+        # # debug
+        # identity_mat[0,0] = 0.
+
         self.pwc.weight.data.copy_(torch.from_numpy(identity_mat).reshape(num_features, num_features, 1, 1))
         self.register_buffer('mask', torch.ones(num_features))
         init.ones_(self.mask)

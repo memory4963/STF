@@ -659,11 +659,9 @@ class CCResRep(CC):
             support_slices = (y_hat_slices if self.max_support_slices < 0 else y_hat_slices[:self.max_support_slices])
             mean_support = torch.cat([latent_means] + support_slices, dim=1)
             mu = self.cc_mean_transforms[slice_index](mean_support)
-            # mu = mu[:, :, :y_shape[0], :y_shape[1]]
 
             scale_support = torch.cat([latent_scales] + support_slices, dim=1)
             scale = self.cc_scale_transforms[slice_index](scale_support)
-            # scale = scale[:, :, :y_shape[0], :y_shape[1]]
 
             _, y_slice_likelihood = self.gaussian_conditional(y_slice, scale, mu)
             y_likelihood.append(y_slice_likelihood)

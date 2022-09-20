@@ -70,9 +70,10 @@ def pre_split_before_pruning(state_dict, num_slices):
     for i in range(num_slices):
         state_dict['h_a.0.conv.weight_{}_{}'.format(i*320//num_slices, (i+1)*320//num_slices)] = weight[:, i*320//num_slices:(i+1)*320//num_slices]
 
+    # g_s.0是deconv
     weight = state_dict.pop('g_s.0.weight')
     for i in range(num_slices):
-        state_dict['g_s.0.weight_{}_{}'.format(i*320//num_slices, (i+1)*320//num_slices)] = weight[:, i*320//num_slices:(i+1)*320//num_slices]
+        state_dict['g_s.0.weight_{}_{}'.format(i*320//num_slices, (i+1)*320//num_slices)] = weight[i*320//num_slices:(i+1)*320//num_slices]
 
     for i in range(num_slices):
         weight = state_dict.pop('cc_mean_transforms.{}.0.conv.weight'.format(i))
@@ -103,35 +104,35 @@ def post_combine_after_pruning(state_dict, num_slices):
     for i in range(num_slices):
         weights.append(state_dict.pop('g_a.6.weight_{}_{}'.format(i*320//num_slices, (i+1)*320//num_slices)))
         biases.append(state_dict.pop('g_a.6.bias_{}_{}'.format(i*320//num_slices, (i+1)*320//num_slices)))
-    state_dict['g_a.6.weight'] = torch.cat(weights, dim=0)
+    state_dict['g_a.6.weight'] = torch.cat(weights, dim=1)
     state_dict['g_a.6.bias'] = torch.cat(biases, dim=0)
 
     weights = []
     for i in range(num_slices):
         weights.append(state_dict.pop('h_a.0.conv.weight_{}_{}'.format(i*320//num_slices, (i+1)*320//num_slices)))
-    state_dict['h_a.0.conv.weight'] = torch.cat(weights, dim=1)
+    state_dict['h_a.0.conv.weight'] = torch.cat(weights, dim=0)
 
     weights = []
     for i in range(num_slices):
         weights.append(state_dict.pop('g_s.0.weight_{}_{}'.format(i*320//num_slices, (i+1)*320//num_slices)))
-    state_dict['g_s.0.weight'] = torch.cat(weights, dim=1)
+    state_dict['g_s.0.weight'] = torch.cat(weights, dim=0)
 
-    weights = []
     for i in range(num_slices):
+        weights = []
         weights.append(state_dict.pop('cc_mean_transforms.{}.0.conv.weight_0_320'.format(i)))
         for j in range(i):
             weights.append(state_dict.pop('cc_mean_transforms.{}.0.conv.weight_{}_{}'.format(i, 320+j*320//num_slices, 320+(j+1)*320//num_slices)))
         state_dict['cc_mean_transforms.{}.0.conv.weight'.format(i)] = torch.cat(weights, dim=1)
 
-    weights = []
     for i in range(num_slices):
+        weights = []
         weights.append(state_dict.pop('cc_scale_transforms.{}.0.conv.weight_0_320'.format(i)))
         for j in range(i):
             weights.append(state_dict.pop('cc_scale_transforms.{}.0.conv.weight_{}_{}'.format(i, 320+j*320//num_slices, 320+(j+1)*320//num_slices)))
         state_dict['cc_scale_transforms.{}.0.conv.weight'.format(i)] = torch.cat(weights, dim=1)
 
-    weights = []
     for i in range(num_slices):
+        weights = []
         weights.append(state_dict.pop('lrp_transforms.{}.0.conv.weight_0_320'.format(i)))
         for j in range(i):
             weights.append(state_dict.pop('lrp_transforms.{}.0.conv.weight_{}_{}'.format(i, 320+j*320//num_slices, 320+(j+1)*320//num_slices)))
