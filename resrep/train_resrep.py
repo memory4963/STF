@@ -442,6 +442,7 @@ def main(argv):
             if resrep_step > 0 and resrep_step % args.mask_interval == 0:
                 print(f'update mask at step {step}')
                 model.resrep_masking(ori_deps, args)
+                print(model.cal_mask_deps())
             d = d.to(device)
             out_criterion, aux_loss = train_one_step(model, d, criterion, optimizer, aux_optimizer, args.lasso_strength, args.distributed, args.clip_max_norm)
 
@@ -468,6 +469,10 @@ def main(argv):
             loss = test_epoch(epoch, test_dataloader, net_without_ddp, criterion)
 
             if args.save:
+                if args.save_path.endswith('.pth.tar'):
+                    save_name = args.save_path[:-8] + '_' + str(epoch) + args.save_path[-8:]
+                else:
+                    save_name = args.save_path.rsplit('.', 1)[0] + '_' + str(epoch) + args.save_path.rsplit('.', 1)[1]
                 save_checkpoint(
                     {
                         "epoch": epoch,
@@ -478,7 +483,7 @@ def main(argv):
                         "lr_scheduler": lr_scheduler.state_dict(),
                         "deps": model.cal_deps()
                     },
-                    args.save_path.split('.', 1)[0] + '_' + str(epoch) + args.save_path.split('.', 1)[1]
+                    save_name
                 )
         if args.distributed:
             dist.barrier()
