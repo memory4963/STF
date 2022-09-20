@@ -26,8 +26,8 @@ def gene_table(num_slices=10):
         }
         cc_table['cc_mean_transforms.{}.4.compactor'.format(i)] = {
             'weight': 'cc_mean_transforms.{}.4.conv.weight'.format(i), 'bias': 'cc_mean_transforms.{}.4.conv.bias'.format(i), 'suc_weight':
-                ['cc_mean_transforms.{}.0.conv.weight'.format(j) for j in range(i+1, num_slices)] + ['lrp_transforms.{}.0.conv.weight'.format(j) for j in range(i+1, num_slices)]
-            , 'conv': True, 'suc_conv': [True]*(2*(num_slices-i-1)), 'type': 'suc_partial', 'ch': [(320+i*320//num_slices, 320+(i+1)*320//num_slices)]*(num_slices-i-1) + [(320+(i+1)*320//num_slices, 320+(i+2)*320//num_slices)]*(num_slices-i-1)
+                ['cc_mean_transforms.{}.0.conv.weight'.format(j) for j in range(i+1, num_slices)] + ['lrp_transforms.{}.0.conv.weight'.format(j) for j in range(i, num_slices)]
+            , 'conv': True, 'suc_conv': [True]*(2*(num_slices-i-1)+1), 'type': 'suc_partial', 'ch': [(320+i*320//num_slices, 320+(i+1)*320//num_slices)]*(num_slices-i-1) + [(320+i*320//num_slices, 320+(i+1)*320//num_slices)]*(num_slices-i)
         }
     for i in range(num_slices):
         cc_table['cc_scale_transforms.{}.0.compactor'.format(i)] = {
@@ -104,13 +104,13 @@ def post_combine_after_pruning(state_dict, num_slices):
     for i in range(num_slices):
         weights.append(state_dict.pop('g_a.6.weight_{}_{}'.format(i*320//num_slices, (i+1)*320//num_slices)))
         biases.append(state_dict.pop('g_a.6.bias_{}_{}'.format(i*320//num_slices, (i+1)*320//num_slices)))
-    state_dict['g_a.6.weight'] = torch.cat(weights, dim=1)
+    state_dict['g_a.6.weight'] = torch.cat(weights, dim=0)
     state_dict['g_a.6.bias'] = torch.cat(biases, dim=0)
 
     weights = []
     for i in range(num_slices):
         weights.append(state_dict.pop('h_a.0.conv.weight_{}_{}'.format(i*320//num_slices, (i+1)*320//num_slices)))
-    state_dict['h_a.0.conv.weight'] = torch.cat(weights, dim=0)
+    state_dict['h_a.0.conv.weight'] = torch.cat(weights, dim=1)
 
     weights = []
     for i in range(num_slices):

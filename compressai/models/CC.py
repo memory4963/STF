@@ -773,3 +773,93 @@ class CCResRep(CC):
             else:
                 cur_state_dict[k] = state_dict[k]
         super().load_state_dict(cur_state_dict)
+
+class CCResRepPruned(CC):
+    def __init__(self, deps, N=192, M=320, num_slices=10, max_support_slices=-1, **kwargs):
+        super().__init__(N, M, num_slices, max_support_slices, **kwargs)
+        self.slice_size = M//num_slices
+        self.deps = deps
+        self.N = N
+        self.M = M
+        self.g_a = nn.Sequential(
+            conv(3, N),
+            GDN(N),
+            conv(N, N),
+            GDN(N),
+            conv(N, N),
+            GDN(N),
+            conv(N, deps['y']),
+        )
+
+        self.g_s = nn.Sequential(
+            deconv(deps['y'], N),
+            GDN(N, inverse=True),
+            deconv(N, N),
+            GDN(N, inverse=True),
+            deconv(N, N),
+            GDN(N, inverse=True),
+            deconv(N, 3),
+        )
+
+        self.h_a = nn.Sequential(
+            conv3x3(deps['y'], deps['h_a'][0]),
+            nn.ReLU(),
+            conv(deps['h_a'][0], deps['h_a'][1], stride=2),
+            nn.ReLU(),
+            conv(deps['h_a'][1], deps['h_a'][2], stride=2),
+        )
+
+        self.h_mean_s = nn.Sequential(
+            deconv(deps['h_a'][2], deps['h_mean_s'][0], stride=2),
+            nn.ReLU(),
+            deconv(deps['h_mean_s'][0], deps['h_mean_s'][1], stride=2),
+            nn.ReLU(),
+            conv3x3(deps['h_mean_s'][1], deps['h_mean_s'][2]),
+        )
+
+        self.h_scale_s = nn.Sequential(
+            deconv(deps['h_a'][2], deps['h_scale_s'][0], stride=2),
+            nn.ReLU(),
+            deconv(deps['h_scale_s'][0], deps['h_scale_s'][1], stride=2),
+            nn.ReLU(),
+            conv3x3(deps['h_scale_s'][1], deps['h_scale_s'][2]),
+        )
+        self.cc_mean_transforms = nn.ModuleList(
+            nn.Sequential(
+                conv3x3(deps['h_mean_s'][2] + sum(map(lambda x: x[-1], deps['cc_mean_transforms'][:i])), deps['cc_mean_transforms'][i][0]),
+                nn.ReLU(),
+                conv3x3(deps['cc_mean_transforms'][i][0], deps['cc_mean_transforms'][i][1]),
+                nn.ReLU(),
+                conv3x3(deps['cc_mean_transforms'][i][1], deps['cc_mean_transforms'][i][2]),
+            ) for i in range(self.num_slices)
+        )
+        self.cc_scale_transforms = nn.ModuleList(
+            nn.Sequential(
+                conv3x3(deps['h_scale_s'][2] + sum(map(lambda x: x[-1], deps['cc_scale_transforms'][:i])), deps['cc_scale_transforms'][i][0]),
+                nn.ReLU(),
+                conv3x3(deps['cc_scale_transforms'][i][0], deps['cc_scale_transforms'][i][1]),
+                nn.ReLU(),
+                conv3x3(deps['cc_scale_transforms'][i][1], deps['cc_scale_transforms'][i][2]),
+            ) for i in range(self.num_slices)
+            )
+        self.lrp_transforms = nn.ModuleList(
+            nn.Sequential(
+                conv3x3(deps['h_mean_s'][2] + deps['cc_mean_transforms'][i][-1] + sum(map(lambda x: x[-1], deps['lrp_transforms'][:i])), deps['lrp_transforms'][i][0]),
+                nn.ReLU(),
+                conv3x3(deps['lrp_transforms'][i][0], deps['lrp_transforms'][i][1]),
+                nn.ReLU(),
+                conv3x3(deps['lrp_transforms'][i][1], deps['lrp_transforms'][i][2]),
+            ) for i in range(self.num_slices)
+        )
+
+        self.entropy_bottleneck = EntropyBottleneck(deps['h_a'][2])
+
+    @classmethod
+    def from_state_dict(cls, state_dict, deps):
+        """Return a new model instance from `state_dict`."""
+        # N = state_dict["g_a.0.weight"].size(0)
+        # M = state_dict["g_a.6.weight"].size(0)
+        # net = cls(N, M)
+        net = cls(deps, 192, 320)
+        net.load_state_dict(state_dict)
+        return net

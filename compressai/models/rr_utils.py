@@ -36,7 +36,7 @@ def cc_model_prune(model, ori_deps, thresh):
     num_slices = model.num_slices
     already_pruned_suc = set()
 
-    pruned_deps = model.cal_deps()
+    pruned_deps = model.cal_deps(thr=thresh)
     pruned_flops = model.cal_cc_flops()
     ori_flops = model.cal_cc_flops(ori_deps)
     print('pruned deps: ')
@@ -110,7 +110,7 @@ def cc_model_prune(model, ori_deps, thresh):
         save_dict[v['weight'].replace('.conv.', '.')] = save_dict.pop(v['weight'])
         save_dict[v['bias'].replace('.conv.', '.')] = save_dict.pop(v['bias'])
 
-    save_dict = {k.replace('module.', '') : v for k, v in save_dict.items() if 'num_batches' not in k and 'compactor' not in k}
+    save_dict = {k.replace('module.', '') : v for k, v in save_dict.items()}
     final_dict = {
         'state_dict': save_dict,
         'deps': pruned_deps

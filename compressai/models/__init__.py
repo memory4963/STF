@@ -17,5 +17,5 @@ from .stf import SymmetricalTransFormer
 from .cnn import WACNN
 from .tbc import TransformerBasedCoding
 from .dystf import DYSTF
-from .CC import CC, CC_uneven, CC_RandomSplit, CCResRep
+from .CC import CC, CC_uneven, CC_RandomSplit, CCResRep, CCResRepPruned
 from .CC_gd import CC_GD
