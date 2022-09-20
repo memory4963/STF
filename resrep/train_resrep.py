@@ -32,6 +32,7 @@ from torch.utils.data.distributed import DistributedSampler
 from torchvision import transforms
 
 from compressai.datasets import ImageFolder
+from compressai.models import rr_utils
 from compressai.zoo import models
 import compressai.utils as utils
 from resrep.rr_builder import CompactorLayer, RRBuilder
@@ -323,7 +324,7 @@ def parse_args(argv):
     parser.add_argument("--least_remain_channel", type=int, default=5, help="least remaining channel of each layer")
 
     parser.add_argument('--world_size', default=1, type=int, help='number of distributed processes')
-    parser.add_argument( "--local_rank", default=0, type=int)
+    parser.add_argument("--local_rank", default=0, type=int)
     parser.add_argument('--dist_url', default='env://', help='url used to set up distributed training')
     parser.add_argument('--distributed', action='store_false')
     args = parser.parse_args(argv)
@@ -446,7 +447,7 @@ def main(argv):
             d = d.to(device)
             out_criterion, aux_loss = train_one_step(model, d, criterion, optimizer, aux_optimizer, args.lasso_strength, args.distributed, args.clip_max_norm)
 
-            if i % 10 == 0 and utils.is_main_process():
+            if i % 100 == 0 and utils.is_main_process():
                 now_time = time()
                 left_time = int((now_time-start_time)/(i-pre_step)*(len(train_dataloader)-i))
                 start_time = now_time
@@ -471,8 +472,10 @@ def main(argv):
             if args.save:
                 if args.save_path.endswith('.pth.tar'):
                     save_name = args.save_path[:-8] + '_' + str(epoch) + args.save_path[-8:]
+                    pruned_save_name = args.save_path[:-8] + '_pruned_' + str(epoch) + args.save_path[-8:]
                 else:
                     save_name = args.save_path.rsplit('.', 1)[0] + '_' + str(epoch) + args.save_path.rsplit('.', 1)[1]
+                    pruned_save_name = args.save_path.rsplit('.', 1)[0] + '_pruned_' + str(epoch) + args.save_path.rsplit('.', 1)[1]
                 save_checkpoint(
                     {
                         "epoch": epoch,
@@ -485,6 +488,7 @@ def main(argv):
                     },
                     save_name
                 )
+                save_checkpoint(rr_utils.cc_model_prune(model, ori_deps), pruned_save_name)
         if args.distributed:
             dist.barrier()
 

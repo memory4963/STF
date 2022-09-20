@@ -6,6 +6,7 @@ import torch.nn as nn
 from compressai.ans import BufferedRansEncoder, RansDecoder
 from compressai.entropy_models import EntropyBottleneck, GaussianConditional
 from compressai.layers import GDN
+from compressai.models import CC_tables
 from .utils import conv, deconv, update_registered_buffers
 from compressai.ops import ste_round
 from compressai.layers import conv3x3, subpel_conv3x3, Win_noShift_Attention
@@ -531,6 +532,8 @@ class CCResRep(CC):
         super().__init__(N, M, num_slices, max_support_slices, **kwargs)
         self.slice_size = M//num_slices
         self.group_id = 0
+        self.N = N
+        self.M = M
 
         self.g_a = nn.Sequential(
             conv(3, N),
@@ -615,16 +618,6 @@ class CCResRep(CC):
             ) for i in range(self.num_slices)
         )
 
-        # self.compactors = {
-        #     'y': [compactor for compactor in self.y_compactors],
-        #     'h_a': [layer[1] for layer in filter(lambda x: len(x)>1 and type(x[1]) == CompactorLayer, self.h_a)],
-        #     'h_mean_s': [layer[1] for layer in filter(lambda x: len(x)>1 and type(x[1]) == CompactorLayer, self.h_mean_s)],
-        #     'h_scale_s': [layer[1] for layer in filter(lambda x: len(x)>1 and type(x[1]) == CompactorLayer, self.h_scale_s)],
-        #     'cc_mean_transforms': [[layer[1] for layer in filter(lambda x: len(x)>1 and type(x[1]) == CompactorLayer, cc_mean_transform)] for cc_mean_transform in self.cc_mean_transforms],
-        #     'cc_scale_transforms': [[layer[1] for layer in filter(lambda x: len(x)>1 and type(x[1]) == CompactorLayer, cc_scale_transform)] for cc_scale_transform in self.cc_scale_transforms],
-        #     'lrp_transforms': [[layer[1] for layer in filter(lambda x: len(x)>1 and type(x[1]) == CompactorLayer, lrp_transform)] for lrp_transform in self.lrp_transforms],
-        # }
-
         self.compactors = \
             [(self.y_compactors[i][0], self.lrp_transforms[i][4][1]) for i in range(self.num_slices)] + \
             [(self.cc_mean_transforms[i][4][1], self.cc_scale_transforms[i][4][1]) for i in range(self.num_slices)] + \
@@ -637,6 +630,8 @@ class CCResRep(CC):
             [(self.cc_scale_transforms[i][2][1],) for i in range(self.num_slices)] + \
             [(self.lrp_transforms[i][0][1],) for i in range(self.num_slices)] + \
             [(self.lrp_transforms[i][2][1],) for i in range(self.num_slices)]
+        
+        self.suc_table = CC_tables.gene_table(self.num_slices)
 
     def forward(self, x):
         ori_y = self.g_a(x)
@@ -706,7 +701,7 @@ class CCResRep(CC):
             if self.compactors[key[0]][0].mask[key[1]] == 0: # already masked, skip
                 continue
             i += 1
-            if self.compactors[key[0]][0].get_num_mask_ones() <= args.least_remain_channel: # this layer should not be masked any more
+            if self.compactors[key[0]][0].get_num_mask_ones() <= args.least_remain_channel: # no more channel in this layer should be masked
                 continue
             for compactor in self.compactors[key[0]]:
                 compactor.set_mask_to_zero(key[1]) # mask, or to say prune
