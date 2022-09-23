@@ -619,8 +619,7 @@ class CCResRep(CC):
         )
 
         self.compactors = \
-            [(self.y_compactors[i][0], self.lrp_transforms[i][4][1]) for i in range(self.num_slices)] + \
-            [(self.cc_mean_transforms[i][4][1], self.cc_scale_transforms[i][4][1]) for i in range(self.num_slices)] + \
+            [(self.y_compactors[i][0], self.lrp_transforms[i][4][1], self.cc_mean_transforms[i][4][1], self.cc_scale_transforms[i][4][1]) for i in range(self.num_slices)] + \
             [(layer[1],) for layer in filter(lambda x: isinstance(x, nn.Sequential) and isinstance(x[1], CompactorLayer), self.h_a)] + \
             [(layer[1],) for layer in filter(lambda x: isinstance(x, nn.Sequential) and isinstance(x[1], CompactorLayer), self.h_mean_s)] + \
             [(layer[1],) for layer in filter(lambda x: isinstance(x, nn.Sequential) and isinstance(x[1], CompactorLayer), self.h_scale_s)] + \
@@ -632,6 +631,7 @@ class CCResRep(CC):
             [(self.lrp_transforms[i][2][1],) for i in range(self.num_slices)]
         
         self.suc_table = CC_tables.gene_table(self.num_slices)
+        self.group_compactor_names = CC_tables.gene_same_group_compactor_name(self.num_slices)
 
     def forward(self, x):
         ori_y = self.g_a(x)
@@ -690,8 +690,10 @@ class CCResRep(CC):
         sorted_keys = sorted(scores, key=scores.get)
         cur_flops = self.cal_cc_flops(cur_deps)
 
+        # 这步保证了不会过度裁剪
         if cur_flops <= args.flops_target * ori_flops:
             return
+
         i = 0
         for key in sorted_keys:
             if i == args.num_per_mask:
@@ -701,20 +703,31 @@ class CCResRep(CC):
             i += 1
             if self.compactors[key[0]][0].get_num_mask_ones() <= args.least_remain_channel: # no more channel in this layer should be masked
                 continue
+            
+            # 按组mask
             for compactor in self.compactors[key[0]]:
-                compactor.set_mask_to_zero(key[1]) # mask, or to say prune
+                compactor.set_mask_to_zero(key[1]) # mask the channel
 
     def cal_deps(self, thr=1e-5):
-        return {
-            'y': max(1, sum([get_remain(layer[0], thr) for layer in self.y_compactors])),
+        deps = {
             'h_a': [get_remain(layer[1], thr) for layer in filter(lambda x: isinstance(x, nn.Sequential) and isinstance(x[1], CompactorLayer), self.h_a)],
             'h_mean_s': [get_remain(layer[1], thr) for layer in filter(lambda x: isinstance(x, nn.Sequential) and isinstance(x[1], CompactorLayer), self.h_mean_s)],
             'h_scale_s': [get_remain(layer[1], thr) for layer in filter(lambda x: isinstance(x, nn.Sequential) and isinstance(x[1], CompactorLayer), self.h_scale_s)],
-            'cc_mean_transforms': [[get_remain(layer[1], thr) for layer in filter(lambda x: isinstance(x, nn.Sequential) and isinstance(x[1], CompactorLayer), cc_mean_transform)] for cc_mean_transform in self.cc_mean_transforms],
-            'cc_scale_transforms': [[get_remain(layer[1], thr) for layer in filter(lambda x: isinstance(x, nn.Sequential) and isinstance(x[1], CompactorLayer), cc_scale_transform)] for cc_scale_transform in self.cc_scale_transforms],
-            'lrp_transforms': [[get_remain(layer[1], thr) for layer in filter(lambda x: isinstance(x, nn.Sequential) and isinstance(x[1], CompactorLayer), lrp_transform)] for lrp_transform in self.lrp_transforms],
+            # 这里没有算每个transforms的最后一层，统一放在后面计算
+            'cc_mean_transforms': [[get_remain(layer[1], thr) for layer in filter(lambda x: isinstance(x, nn.Sequential) and isinstance(x[1], CompactorLayer), cc_mean_transform[:-1])] for cc_mean_transform in self.cc_mean_transforms],
+            'cc_scale_transforms': [[get_remain(layer[1], thr) for layer in filter(lambda x: isinstance(x, nn.Sequential) and isinstance(x[1], CompactorLayer), cc_scale_transform[:-1])] for cc_scale_transform in self.cc_scale_transforms],
+            'lrp_transforms': [[get_remain(layer[1], thr) for layer in filter(lambda x: isinstance(x, nn.Sequential) and isinstance(x[1], CompactorLayer), lrp_transform[:-1])] for lrp_transform in self.lrp_transforms],
         }
-    
+        # 计算latent representation的输出通道
+        # 这步是为了计算的时候让相同组compactor最后计算出来的通道数一样，保证deps的正确性，如果pruning部分改了实现方法，这里也需要修改
+        y_ch = [get_group_remain([self.y_compactors[i][0], self.cc_mean_transforms[i][-1][1], self.cc_scale_transforms[i][-1][1], self.lrp_transforms[i][-1][1]], thr) for i in range(self.num_slices)]
+        deps['y'] = sum(y_ch)
+        for i in range(self.num_slices):
+            deps['cc_mean_transforms'][i].append(y_ch[i])
+            deps['cc_scale_transforms'][i].append(y_ch[i])
+            deps['lrp_transforms'][i].append(y_ch[i])
+        return deps
+
     def cal_mask_deps(self):
         return {
             'y': max(1, sum([compactor[0].get_num_mask_ones() for compactor in self.y_compactors])),

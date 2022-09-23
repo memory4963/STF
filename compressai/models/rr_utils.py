@@ -9,6 +9,13 @@ def get_remain(vec: CompactorLayer, thr):
     return np.sum(vec.get_metric_vector() >= thr)
 
 
+def get_group_remain(compactors, thr):
+    remaining = np.zeros(compactors[0].get_pwc_kernel_detach().shape[0])
+    for compactor in compactors:
+        remaining = np.logical_or(remaining, compactor.get_metric_vector() >= thr)
+    return np.sum(remaining)
+
+
 def cal_conv_flops(in_ch, out_ch, h, w, ks):
     # transposed conv的h和w是输入feature map
     # 普通conv的h和w是输出feature map
@@ -51,7 +58,12 @@ def cc_model_prune(model, ori_deps, thresh):
     save_dict = CC_tables.pre_split_before_pruning(save_dict, num_slices)
 
     for k, v in table.items():
-        compactor = save_dict[k+'.pwc.weight']
+        if k in model.group_compactor_names:
+            # 保证同组的compactor最终的输出维度是一样的
+            # compator第一个一定要是当前的compactor
+            compactor = [save_dict[k+'.pwc.weight']] + list(map(lambda x: save_dict[x+'.pwc.weight'], model.group_compactor_names[k]))
+        else:
+            compactor = save_dict[k+'.pwc.weight']
 
         if v['type'] == 'split':
             for k in save_dict:
@@ -119,13 +131,16 @@ def cc_model_prune(model, ori_deps, thresh):
 
 
 def fold_conv(fused_k, fused_b, thresh, compactor_mat, deconv=False):
-    # pixel shuffle
-    # if compactor_mat.shape[0] != fused_k.shape[0]:
-    #     pxl_sfl = True
-    # else:
-    #     pxl_sfl = False
-    metric_vec = torch.sqrt(torch.sum(compactor_mat ** 2, axis=(1, 2, 3)))
-    filter_ids_higher_thresh = torch.where(metric_vec > thresh)[0]
+    # 只要有一个compactor中的这个channel超过阈值就保留
+    if isinstance(compactor_mat, list):
+        metric_vec = torch.sqrt(torch.sum(compactor_mat[0] ** 2, axis=(1, 2, 3))) > thresh
+        for __compactor_mat in compactor_mat[1:]:
+            metric_vec = torch.logical_or(metric_vec, torch.sqrt(torch.sum(__compactor_mat ** 2, axis=(1, 2, 3))) > thresh)
+        filter_ids_higher_thresh = torch.where(metric_vec)[0]
+        compactor_mat = compactor_mat[0]
+    else:
+        metric_vec = torch.sqrt(torch.sum(compactor_mat ** 2, axis=(1, 2, 3)))
+        filter_ids_higher_thresh = torch.where(metric_vec > thresh)[0]
 
     if len(filter_ids_higher_thresh) < 1:
         sortd_ids = torch.argsort(metric_vec)
@@ -134,30 +149,13 @@ def fold_conv(fused_k, fused_b, thresh, compactor_mat, deconv=False):
     if len(filter_ids_higher_thresh) < len(metric_vec):
         compactor_mat = compactor_mat.index_select(0, filter_ids_higher_thresh)
 
-    # pixel shuffle
-    # if pxl_sfl:
-    #     kernel = F.conv2d(fused_k[::4].permute(1,0,2,3), compactor_mat,
-    #                     padding=(0,0)).permute(1,0,2,3)[True,:]
-    #     for k in range(1,4):
-    #         kernel = torch.cat((kernel, F.conv2d(fused_k[k::4].permute(1,0,2,3), compactor_mat,
-    #                     padding=(0,0)).permute(1,0,2,3)[True,:]), 0)
-    #     sz = kernel.shape
-    #     kernel = kernel.permute(1,0,2,3,4).reshape(sz[0]*sz[1], sz[2],sz[3],sz[4])
     if deconv:
         kernel = F.conv2d(fused_k, compactor_mat, padding=(0, 0))
     else:
         kernel = F.conv2d(fused_k.permute(1, 0, 2, 3), compactor_mat,
                         padding=(0, 0)).permute(1, 0, 2, 3)
     Dprime = compactor_mat.shape[0]
-    # pixel shuffle
-    # if pxl_sfl:
-    #     bias = fused_b[::4].dot(compactor_mat[0,:,0,0])[True]
-    #     for k in range(0,4):
-    #         for j in range(compactor_mat.shape[0]):
-    #             if k==0 and j==0:
-    #                 continue
-    #             bias = torch.cat((bias, fused_b[k::4].dot(compactor_mat[j,:,0,0])[True]), 0)
-    # else:
+
     if fused_b is not None:
         bias = torch.zeros(Dprime)
         for i in range(Dprime):

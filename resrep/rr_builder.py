@@ -69,8 +69,11 @@ class CompactorLayer(nn.Module):
                           stride=1, padding=0, bias=False)
         identity_mat = np.eye(num_features, dtype=np.float32)
 
-        # # debug
+        # debug
         # identity_mat[0,0] = 0.
+        # if num_features == 32:
+        #     identity_mat[0,0] = 0.
+
 
         self.pwc.weight.data.copy_(torch.from_numpy(identity_mat).reshape(num_features, num_features, 1, 1))
         self.register_buffer('mask', torch.ones(num_features))

@@ -58,6 +58,16 @@ def gene_table(num_slices=10):
     return cc_table
 
 
+def gene_same_group_compactor_name(num_slices=10):
+    compactor_names = {}
+    for i in range(num_slices):
+        compactor_names['y_compactors.{}.0'.format(i)] = ['lrp_transforms.{}.4.compactor'.format(i), 'cc_scale_transforms.{}.4.compactor'.format(i), 'cc_mean_transforms.{}.4.compactor'.format(i)]
+        compactor_names['lrp_transforms.{}.4.compactor'.format(i)] = ['y_compactors.{}.0'.format(i), 'cc_scale_transforms.{}.4.compactor'.format(i), 'cc_mean_transforms.{}.4.compactor'.format(i)]
+        compactor_names['cc_scale_transforms.{}.4.compactor'.format(i)] = ['y_compactors.{}.0'.format(i), 'lrp_transforms.{}.4.compactor'.format(i), 'cc_mean_transforms.{}.4.compactor'.format(i)]
+        compactor_names['cc_mean_transforms.{}.4.compactor'.format(i)] = ['y_compactors.{}.0'.format(i), 'lrp_transforms.{}.4.compactor'.format(i), 'cc_scale_transforms.{}.4.compactor'.format(i)]
+    return compactor_names
+
+
 def pre_split_before_pruning(state_dict, num_slices):
     # 只有g_a不太一样，分割第一维
     weight = state_dict.pop('g_a.6.weight')
