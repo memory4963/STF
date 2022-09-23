@@ -876,3 +876,72 @@ class CCResRepPruned(CC):
         net = cls(deps, 192, 320)
         net.load_state_dict(state_dict)
         return net
+
+
+class CC_manual_prune(CC):
+    def __init__(self, N=192, M=320, num_slices=10, max_support_slices=-1, **kwargs):
+        super().__init__(N, M, num_slices, max_support_slices, **kwargs)
+        self.h_a = nn.Sequential(
+            conv3x3(320, 320//2),
+            nn.ReLU(),
+            conv(320//2, 256//2, stride=2),
+            nn.ReLU(),
+            conv(256//2, 192//2, stride=2),
+        )
+
+        self.h_mean_s = nn.Sequential(
+            deconv(192//2, 192//2, stride=2),
+            nn.ReLU(),
+            deconv(192//2, 256//2, stride=2),
+            nn.ReLU(),
+            conv3x3(256//2, 320//2),
+        )
+
+        self.h_scale_s = nn.Sequential(
+            deconv(192//2, 192//2, stride=2),
+            nn.ReLU(),
+            deconv(192//2, 256//2, stride=2),
+            nn.ReLU(),
+            conv3x3(256//2, 320//2),
+        )
+        self.cc_mean_transforms = nn.ModuleList(
+            nn.Sequential(
+                conv3x3(320//2 + 320//self.num_slices*i, 224//2 + 320//self.num_slices*i*2//3//2),
+                nn.ReLU(),
+                conv3x3(224//2 + 320//self.num_slices*i*2//3//2, 128//2 + 320//self.num_slices*i*1//3//2),
+                nn.ReLU(),
+                conv3x3(128//2 + 320//self.num_slices*i*1//3//2, 320//self.num_slices),
+            ) for i in range(self.num_slices)
+        )
+        self.cc_scale_transforms = nn.ModuleList(
+            nn.Sequential(
+                conv3x3(320//2 + 320//self.num_slices*i, 224//2 + 320//self.num_slices*i*2//3//2),
+                nn.ReLU(),
+                conv3x3(224//2 + 320//self.num_slices*i*2//3//2, 128//2 + 320//self.num_slices*i*1//3//2),
+                nn.ReLU(),
+                conv3x3(128//2 + 320//self.num_slices*i*1//3//2, 320//self.num_slices),
+            ) for i in range(self.num_slices)
+            )
+        self.lrp_transforms = nn.ModuleList(
+            nn.Sequential(
+                conv3x3(320//2 + 320//self.num_slices*(i+1), 224//2 + 320//self.num_slices*i*2//3//2),
+                nn.ReLU(),
+                conv3x3(224//2 + 320//self.num_slices*i*2//3//2, 128//2 + 320//self.num_slices*i*1//3//2),
+                nn.ReLU(),
+                conv3x3(128//2 + 320//self.num_slices*i*1//3//2, 320//self.num_slices),
+            ) for i in range(self.num_slices)
+        )
+        self.entropy_bottleneck = EntropyBottleneck(N//2)
+
+    def load_state_dict(self, state_dict):
+        update_registered_buffers(
+            self.gaussian_conditional,
+            "gaussian_conditional",
+            ["_quantized_cdf", "_offset", "_cdf_length", "scale_table"],
+            state_dict,
+        )
+        cur_state_dict = self.state_dict()
+        for k in state_dict:
+            if state_dict[k].shape == cur_state_dict[k].shape:
+                cur_state_dict[k] = state_dict[k]
+        super().load_state_dict(cur_state_dict)

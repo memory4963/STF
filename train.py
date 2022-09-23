@@ -149,7 +149,7 @@ def train_one_epoch(
         aux_loss.backward()
         aux_optimizer.step()
 
-        if i % 10 == 0 and utils.is_main_process():
+        if i % 100 == 0 and utils.is_main_process():
             now_time = time()
             left_time = int((now_time-start_time)/(i-pre_step)*(len(train_dataloader)-i))
             start_time = now_time
@@ -286,6 +286,7 @@ def parse_args(argv):
         help="gradient clipping max norm (default: %(default)s",
     )
     parser.add_argument("--checkpoint", type=str, help="Path to a checkpoint")
+    parser.add_argument("--pretrained", type=str, help="Path to a pretrained ckpt")
     parser.add_argument('--world_size', default=1, type=int, help='number of distributed processes')
     parser.add_argument( "--local_rank", default=0, type=int)
     parser.add_argument('--dist_url', default='env://', help='url used to set up distributed training')
@@ -372,6 +373,12 @@ def main(argv):
     criterion = RateDistortionLoss()
 
     last_epoch = 0
+    if args.pretrained and os.path.exists(args.pretrained):
+        if utils.is_main_process():
+            print("Loading", args.pretrained)
+        state_dict = torch.load(args.pretrained, map_location=device)['state_dict']
+        print(net.load_state_dict(state_dict))
+
     if args.checkpoint and os.path.exists(args.checkpoint):  # load from previous checkpoint
         if utils.is_main_process():
             print("Loading", args.checkpoint)
