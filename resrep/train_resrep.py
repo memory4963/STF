@@ -190,10 +190,8 @@ def train_one_step(model, d, criterion, optimizer, aux_optimizer, lasso_strength
     for group in model.compactors:
         for compactor in group:
             # mask掉的通道只会继续被降低，丢掉正常的loss
-            weight = compactor.get_pwc_kernel()
-            weight.grad.data = torch.einsum('i,ijkl->ijkl', compactor.mask, weight.grad.data)
-            lasso_grad = weight.data * ((weight.data ** 2).sum(dim=(1, 2, 3), keepdim=True) ** (-0.5))
-            weight.grad.data.add_(lasso_strength, lasso_grad)
+            compactor.mask_weight_grad()
+            compactor.add_lasso_penalty(lasso_strength)
 
     optimizer.step()
     aux_optimizer.step()
@@ -456,7 +454,7 @@ def main(argv):
 
         # debug
         # pruned_save_name = args.save_path[:-8] + '_pruned_' + str(epoch) + args.save_path[-8:]
-        # save_checkpoint(rr_utils.cc_model_prune(model, ori_deps, args.threshold), pruned_save_name)
+        # save_checkpoint(rr_utils.cc_model_prune(model, ori_deps, args.threshold, enhanced_resrep='enhance' in args.model), pruned_save_name)
 
         for i, d in enumerate(train_dataloader):
             resrep_step = step - args.resrep_warmup_step
@@ -510,7 +508,7 @@ def main(argv):
                     },
                     save_name
                 )
-                save_checkpoint(rr_utils.cc_model_prune(model, ori_deps, args.threshold), pruned_save_name)
+                save_checkpoint(rr_utils.cc_model_prune(model, ori_deps, args.threshold, enhanced_resrep='enhance' in args.model), pruned_save_name)
         if args.distributed:
             dist.barrier()
 

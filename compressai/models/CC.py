@@ -7,6 +7,7 @@ from compressai.ans import BufferedRansEncoder, RansDecoder
 from compressai.entropy_models import EntropyBottleneck, GaussianConditional
 from compressai.layers import GDN
 from compressai.models import CC_tables
+from resrep.rr_builder import EnhancedCompactorLayer
 from .utils import conv, deconv, update_registered_buffers
 from compressai.ops import ste_round
 from compressai.layers import conv3x3, subpel_conv3x3, Win_noShift_Attention
@@ -531,7 +532,6 @@ class CCResRep(CC):
     def __init__(self, builder: RRBuilder, N=192, M=320, num_slices=10, max_support_slices=-1, **kwargs):
         super().__init__(N, M, num_slices, max_support_slices, **kwargs)
         self.slice_size = M//num_slices
-        self.group_id = 0
         self.N = N
         self.M = M
 
@@ -556,10 +556,7 @@ class CCResRep(CC):
         )
 
         # y的通道剪枝，为了和后面的lrp输出对应，因此分割成num_slices个compactor
-        self.y_compactors = nn.ModuleList(builder.GroupCompactor(self.slice_size, self.group_id + i) for i in range(self.num_slices))
-        # 保证lrp的group id和y_compactors的一样
-        lrp_group_id_start = self.group_id
-        self.group_id += self.num_slices
+        self.y_compactors = self.gene_y_compactors(builder)
 
         self.h_a = nn.Sequential(
             builder.Conv2dRR(M, M, stride=1, padding=1),
@@ -582,7 +579,6 @@ class CCResRep(CC):
             nn.ReLU(),
             builder.ConvTranspose2dRR(N, 256, kernel_size=5, stride=2, output_padding=1, padding=2),
             nn.ReLU(),
-            # group id和h_mean_s一样
             builder.Conv2dRR(256, M, stride=1, padding=1),
         )
 
@@ -592,7 +588,7 @@ class CCResRep(CC):
                 nn.ReLU(),
                 builder.Conv2dRR(224 + self.slice_size*i*2//3, 128 + self.slice_size*i*1//3, stride=1, padding=1),
                 nn.ReLU(),
-                builder.Conv2dGroupRR(128 + self.slice_size*i*1//3, self.slice_size, stride=1, padding=1, group_id=self.group_id + i),
+                builder.Conv2dRR(128 + self.slice_size*i*1//3, self.slice_size, stride=1, padding=1),
             ) for i in range(self.num_slices)
         )
         self.cc_scale_transforms = nn.ModuleList(
@@ -601,11 +597,9 @@ class CCResRep(CC):
                 nn.ReLU(),
                 builder.Conv2dRR(224 + self.slice_size*i*2//3, 128 + self.slice_size*i*1//3, stride=1, padding=1),
                 nn.ReLU(),
-                # group id和cc_mean_trainsforms相同
-                builder.Conv2dGroupRR(128 + self.slice_size*i*1//3, self.slice_size, stride=1, padding=1, group_id=self.group_id + i),
+                builder.Conv2dRR(128 + self.slice_size*i*1//3, self.slice_size, stride=1, padding=1),
             ) for i in range(self.num_slices)
         )
-        self.group_id += self.num_slices
 
         self.lrp_transforms = nn.ModuleList(
             nn.Sequential(
@@ -613,8 +607,7 @@ class CCResRep(CC):
                 nn.ReLU(),
                 builder.Conv2dRR(224 + self.slice_size*i*2//3, 128 + self.slice_size*i*1//3, stride=1, padding=1),
                 nn.ReLU(),
-                # group id和y+compactors相同
-                builder.Conv2dGroupRR(128 + self.slice_size*i*1//3, self.slice_size, stride=1, padding=1, group_id=lrp_group_id_start + i),
+                builder.Conv2dRR(128 + self.slice_size*i*1//3, self.slice_size, stride=1, padding=1),
             ) for i in range(self.num_slices)
         )
 
@@ -632,12 +625,13 @@ class CCResRep(CC):
         
         self.suc_table = CC_tables.gene_table(self.num_slices)
         self.group_compactor_names = CC_tables.gene_same_group_compactor_name(self.num_slices)
+    
+    def gene_y_compactors(self, builder: RRBuilder):
+        return nn.ModuleList(builder.SingleCompactor(self.slice_size) for _ in range(self.num_slices))
 
     def forward(self, x):
-        ori_y = self.g_a(x)
-        y = torch.zeros_like(ori_y)
-        for i in range(self.num_slices):
-            y[:, i*self.slice_size:(i+1)*self.slice_size] = self.y_compactors[i](ori_y[:, i*self.slice_size:(i+1)*self.slice_size])
+        y = self.g_a(x)
+        y = self.compact_y(y)
         z = self.h_a(y)
         _, z_likelihoods = self.entropy_bottleneck(z)
 
@@ -682,7 +676,13 @@ class CCResRep(CC):
             "x_hat": x_hat,
             "likelihoods": {"y": y_likelihoods, "z": z_likelihoods},
         }
-    
+
+    def compact_y(self, ori_y):
+        y = torch.zeros_like(ori_y)
+        for i in range(self.num_slices):
+            y[:, i*self.slice_size:(i+1)*self.slice_size] = self.y_compactors[i](ori_y[:, i*self.slice_size:(i+1)*self.slice_size])
+        return y
+
     def resrep_masking(self, ori_deps, args):
         ori_flops = cal_cc_flops(ori_deps)
         scores = cal_compactor_scores(self.compactors)
@@ -755,6 +755,21 @@ class CCResRep(CC):
             else:
                 cur_state_dict[k] = state_dict[k]
         super().load_state_dict(cur_state_dict)
+
+
+class CCEnhancedResRep(CCResRep):
+    def __init__(self, builder: RRBuilder, N=192, M=320, num_slices=10, max_support_slices=-1, **kwargs):
+        super().__init__(builder, N, M, num_slices, max_support_slices, **kwargs)
+
+    def gene_y_compactors(self, builder: RRBuilder):
+        return nn.ModuleList(builder.SingleEnhancedCompactor(self.M, self.slice_size, i*self.slice_size) for i in range(self.num_slices)) 
+
+    def compact_y(self, ori_y):
+        y = torch.zeros_like(ori_y)
+        for i in range(self.num_slices):
+            y[:, i*self.slice_size:(i+1)*self.slice_size] = self.y_compactors[i](ori_y)
+        return y
+
 
 class CCResRepPruned(CC):
     def __init__(self, deps, N=192, M=320, num_slices=10, max_support_slices=-1, **kwargs):

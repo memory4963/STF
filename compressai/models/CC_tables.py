@@ -68,13 +68,17 @@ def gene_same_group_compactor_name(num_slices=10):
     return compactor_names
 
 
-def pre_split_before_pruning(state_dict, num_slices):
+def pre_split_before_pruning(state_dict, num_slices, enhanced_resrep=False):
     # 只有g_a不太一样，分割第一维
     weight = state_dict.pop('g_a.6.weight')
     bias = state_dict.pop('g_a.6.bias')
     for i in range(num_slices):
-        state_dict['g_a.6.weight_{}_{}'.format(i*320//num_slices, (i+1)*320//num_slices)] = weight[i*320//num_slices:(i+1)*320//num_slices]
-        state_dict['g_a.6.bias_{}_{}'.format(i*320//num_slices, (i+1)*320//num_slices)] = bias[i*320//num_slices:(i+1)*320//num_slices]
+        if enhanced_resrep:
+            state_dict['g_a.6.weight_{}_{}'.format(i*320//num_slices, (i+1)*320//num_slices)] = torch.Tensor(weight)
+            state_dict['g_a.6.bias_{}_{}'.format(i*320//num_slices, (i+1)*320//num_slices)] = torch.Tensor(bias)
+        else:
+            state_dict['g_a.6.weight_{}_{}'.format(i*320//num_slices, (i+1)*320//num_slices)] = weight[i*320//num_slices:(i+1)*320//num_slices]
+            state_dict['g_a.6.bias_{}_{}'.format(i*320//num_slices, (i+1)*320//num_slices)] = bias[i*320//num_slices:(i+1)*320//num_slices]
 
     weight = state_dict.pop('h_a.0.conv.weight')
     for i in range(num_slices):

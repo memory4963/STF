@@ -10,7 +10,7 @@ def get_remain(vec: CompactorLayer, thr):
 
 
 def get_group_remain(compactors, thr):
-    remaining = np.zeros(compactors[0].get_pwc_kernel_detach().shape[0])
+    remaining = np.zeros(compactors[0].num_features)
     for compactor in compactors:
         remaining = np.logical_or(remaining, compactor.get_metric_vector() >= thr)
     return np.sum(remaining)
@@ -67,7 +67,7 @@ def cal_cc_flops(deps):
     return flops
 
 
-def cc_model_prune(model, ori_deps, thresh):
+def cc_model_prune(model, ori_deps, thresh, enhanced_resrep):
     table = model.suc_table
     num_slices = model.num_slices
     already_pruned_suc = set()
@@ -84,7 +84,7 @@ def cc_model_prune(model, ori_deps, thresh):
     for k, v in cur_state_dict.items():
         v = v.detach().cpu()
         save_dict[k] = v
-    save_dict = CC_tables.pre_split_before_pruning(save_dict, num_slices)
+    save_dict = CC_tables.pre_split_before_pruning(save_dict, num_slices, enhanced_resrep)
 
     for k, v in table.items():
         if k in model.group_compactor_names:
@@ -95,12 +95,12 @@ def cc_model_prune(model, ori_deps, thresh):
             compactor = save_dict[k+'.pwc.weight']
 
         if v['type'] == 'split':
-            for k in save_dict:
-                if v['weight'] not in k:
+            for k1 in save_dict:
+                if v['weight'] not in k1:
                     continue
-                weight = save_dict[k]
+                weight = save_dict[k1]
                 pruned_weight, pruned_bias, survived_ids = fold_conv(weight, None, thresh, compactor, not v['conv'])
-                save_dict[k] = pruned_weight
+                save_dict[k1] = pruned_weight
             save_dict[v['bias']] = save_dict[v['bias']][survived_ids.long()]
         else:
             if v['type'] == 'partial':
