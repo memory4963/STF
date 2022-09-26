@@ -38,14 +38,43 @@ def already_masked(compactor: CompactorLayer, k):
     return compactor.mask[k] == 0
 
 
+def cal_cc_flops(deps):
+    flops = cal_conv_flops(deps['y'], deps['h_a'][0], 16, 16, 3)
+    flops += cal_conv_flops(deps['h_a'][0], deps['h_a'][1], 8, 8, 5)
+    flops += cal_conv_flops(deps['h_a'][1], deps['h_a'][2], 4, 4, 5)
+    flops += cal_conv_flops(deps['h_a'][2], deps['h_mean_s'][0], 4, 4, 5)
+    flops += cal_conv_flops(deps['h_mean_s'][0], deps['h_mean_s'][1], 4, 4, 5)
+    flops += cal_conv_flops(deps['h_mean_s'][1], deps['h_mean_s'][2], 8, 8, 5)
+    flops += cal_conv_flops(deps['h_a'][2], deps['h_scale_s'][0], 4, 4, 5)
+    flops += cal_conv_flops(deps['h_scale_s'][0], deps['h_scale_s'][1], 4, 4, 5)
+    flops += cal_conv_flops(deps['h_scale_s'][1], deps['h_scale_s'][2], 8, 8, 5)
+
+    former_ch_sum = 0
+    for i in range(1, len(deps['cc_mean_transforms'])):
+        flops += cal_conv_flops(deps['h_mean_s'][2] + former_ch_sum, deps['cc_mean_transforms'][i][0], 16, 16, 3)
+        flops += cal_conv_flops(deps['cc_mean_transforms'][i][0], deps['cc_mean_transforms'][i][1], 16, 16, 3)
+        flops += cal_conv_flops(deps['cc_mean_transforms'][i][1], deps['cc_mean_transforms'][i][2], 16, 16, 3)
+
+        flops += cal_conv_flops(deps['h_scale_s'][2] + former_ch_sum, deps['cc_scale_transforms'][i][0], 16, 16, 3)
+        flops += cal_conv_flops(deps['cc_scale_transforms'][i][0], deps['cc_scale_transforms'][i][1], 16, 16, 3)
+        flops += cal_conv_flops(deps['cc_scale_transforms'][i][1], deps['cc_scale_transforms'][i][2], 16, 16, 3)
+
+        flops += cal_conv_flops(deps['h_mean_s'][2] + former_ch_sum + deps['cc_mean_transforms'][i][2], deps['lrp_transforms'][i][0], 16, 16, 3)
+        flops += cal_conv_flops(deps['lrp_transforms'][i][0], deps['lrp_transforms'][i][1], 16, 16, 3)
+        flops += cal_conv_flops(deps['lrp_transforms'][i][1], deps['lrp_transforms'][i][2], 16, 16, 3)
+        former_ch_sum += deps['cc_mean_transforms'][i][2]
+
+    return flops
+
+
 def cc_model_prune(model, ori_deps, thresh):
     table = model.suc_table
     num_slices = model.num_slices
     already_pruned_suc = set()
 
     pruned_deps = model.cal_deps(thr=thresh)
-    pruned_flops = model.cal_cc_flops()
-    ori_flops = model.cal_cc_flops(ori_deps)
+    pruned_flops = cal_cc_flops(pruned_deps)
+    ori_flops = cal_cc_flops(ori_deps)
     print('pruned deps: ')
     print(pruned_deps)
     print('keep portion: ', pruned_flops/ori_flops)

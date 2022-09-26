@@ -35,6 +35,7 @@ from torchvision import transforms
 import compressai
 
 from compressai.zoo import load_state_dict, models
+from compressai.models.rr_utils import cal_cc_flops
 
 torch.backends.cudnn.deterministic = True
 torch.set_num_threads(1)
@@ -254,6 +255,10 @@ def main(argv):
             sys.stderr.write(log_fmt.format(*opts, run=run))
             sys.stderr.flush()
         model = load_func(*opts, run)
+
+        # calculate remaining flops
+        print('remaining flops:', cal_cc_flops(model.deps)/cal_cc_flops(model.ori_deps()))
+
         if args.cuda and torch.cuda.is_available():
             model = model.to("cuda")
 

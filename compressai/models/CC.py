@@ -684,11 +684,11 @@ class CCResRep(CC):
         }
     
     def resrep_masking(self, ori_deps, args):
-        ori_flops = self.cal_cc_flops(ori_deps)
+        ori_flops = cal_cc_flops(ori_deps)
         scores = cal_compactor_scores(self.compactors)
         cur_deps = self.cal_mask_deps()
         sorted_keys = sorted(scores, key=scores.get)
-        cur_flops = self.cal_cc_flops(cur_deps)
+        cur_flops = cal_cc_flops(cur_deps)
 
         # 这步保证了不会过度裁剪
         if cur_flops <= args.flops_target * ori_flops:
@@ -738,37 +738,6 @@ class CCResRep(CC):
             'cc_scale_transforms': [[layer[1].get_num_mask_ones() for layer in filter(lambda x: isinstance(x, nn.Sequential) and isinstance(x[1], CompactorLayer), cc_scale_transform)] for cc_scale_transform in self.cc_scale_transforms],
             'lrp_transforms': [[layer[1].get_num_mask_ones() for layer in filter(lambda x: isinstance(x, nn.Sequential) and isinstance(x[1], CompactorLayer), lrp_transform)] for lrp_transform in self.lrp_transforms],
         }
-
-    def cal_cc_flops(self, deps=None):
-        if deps is None:
-            deps = self.cal_deps()
-
-        flops = cal_conv_flops(deps['y'], deps['h_a'][0], 16, 16, 3)
-        flops += cal_conv_flops(deps['h_a'][0], deps['h_a'][1], 8, 8, 5)
-        flops += cal_conv_flops(deps['h_a'][1], deps['h_a'][2], 4, 4, 5)
-        flops += cal_conv_flops(deps['h_a'][2], deps['h_mean_s'][0], 4, 4, 5)
-        flops += cal_conv_flops(deps['h_mean_s'][0], deps['h_mean_s'][1], 4, 4, 5)
-        flops += cal_conv_flops(deps['h_mean_s'][1], deps['h_mean_s'][2], 8, 8, 5)
-        flops += cal_conv_flops(deps['h_a'][2], deps['h_scale_s'][0], 4, 4, 5)
-        flops += cal_conv_flops(deps['h_scale_s'][0], deps['h_scale_s'][1], 4, 4, 5)
-        flops += cal_conv_flops(deps['h_scale_s'][1], deps['h_scale_s'][2], 8, 8, 5)
-
-        former_ch_sum = 0
-        for i in range(1, self.num_slices):
-            flops += cal_conv_flops(deps['h_mean_s'][2] + former_ch_sum, deps['cc_mean_transforms'][i][0], 16, 16, 3)
-            flops += cal_conv_flops(deps['cc_mean_transforms'][i][0], deps['cc_mean_transforms'][i][1], 16, 16, 3)
-            flops += cal_conv_flops(deps['cc_mean_transforms'][i][1], deps['cc_mean_transforms'][i][2], 16, 16, 3)
-
-            flops += cal_conv_flops(deps['h_scale_s'][2] + former_ch_sum, deps['cc_scale_transforms'][i][0], 16, 16, 3)
-            flops += cal_conv_flops(deps['cc_scale_transforms'][i][0], deps['cc_scale_transforms'][i][1], 16, 16, 3)
-            flops += cal_conv_flops(deps['cc_scale_transforms'][i][1], deps['cc_scale_transforms'][i][2], 16, 16, 3)
-
-            flops += cal_conv_flops(deps['h_mean_s'][2] + former_ch_sum + deps['cc_mean_transforms'][i][2], deps['lrp_transforms'][i][0], 16, 16, 3)
-            flops += cal_conv_flops(deps['lrp_transforms'][i][0], deps['lrp_transforms'][i][1], 16, 16, 3)
-            flops += cal_conv_flops(deps['lrp_transforms'][i][1], deps['lrp_transforms'][i][2], 16, 16, 3)
-            former_ch_sum += deps['cc_mean_transforms'][i][2]
-
-        return flops
 
     def load_pretrained(self, state_dict):
         update_registered_buffers(
@@ -867,6 +836,12 @@ class CCResRepPruned(CC):
 
         self.entropy_bottleneck = EntropyBottleneck(deps['h_a'][2])
 
+    def split_slices(self, y):
+        splits = []
+        for i in range(self.num_slices):
+            splits.append(self.deps['lrp_transforms'][i][2])
+        return y.split(splits, dim=1)
+
     @classmethod
     def from_state_dict(cls, state_dict, deps):
         """Return a new model instance from `state_dict`."""
@@ -876,3 +851,6 @@ class CCResRepPruned(CC):
         net = cls(deps, 192, 320)
         net.load_state_dict(state_dict)
         return net
+    
+    def ori_deps(self):
+        return {'h_a': [320, 256, 192], 'h_mean_s': [192, 256, 320], 'h_scale_s': [192, 256, 320], 'cc_mean_transforms': [[224, 128, 32], [245, 138, 32], [266, 149, 32], [288, 160, 32], [309, 170, 32], [330, 181, 32], [352, 192, 32], [373, 202, 32], [394, 213, 32], [416, 224, 32]], 'cc_scale_transforms': [[224, 128, 32], [245, 138, 32], [266, 149, 32], [288, 160, 32], [309, 170, 32], [330, 181, 32], [352, 192, 32], [373, 202, 32], [394, 213, 32], [416, 224, 32]], 'lrp_transforms': [[224, 128, 32], [245, 138, 32], [266, 149, 32], [288, 160, 32], [309, 170, 32], [330, 181, 32], [352, 192, 32], [373, 202, 32], [394, 213, 32], [416, 224, 32]], 'y': 320}

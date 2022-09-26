@@ -83,7 +83,9 @@ class CompactorLayer(nn.Module):
     def forward(self, inputs):
         return self.pwc(inputs)
 
-    def set_mask_to_zero(self, zero_indices):
+    def set_mask_to_zero(self, zero_idx):
+        zero_indices = list(np.where(self.mask.data.cpu() < 0.5)[0])
+        zero_indices.append(zero_idx)
         new_mask_value = np.ones(self.num_features, dtype=np.float32)
         new_mask_value[np.array(zero_indices)] = 0.0
         self.mask.data = torch.from_numpy(new_mask_value).cuda().type(torch.cuda.FloatTensor)

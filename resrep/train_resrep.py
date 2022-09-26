@@ -400,6 +400,7 @@ def main(argv):
     model = models[args.model](RRBuilder(), num_slices=args.num_slices)
     model = model.to(device)
     ori_deps = model.cal_deps()
+    # print(ori_deps)
 
     net_without_ddp = model
     if args.distributed:
@@ -448,7 +449,9 @@ def main(argv):
             if resrep_step > 0 and resrep_step % args.mask_interval == 0:
                 print(f'update mask at step {step}')
                 model.resrep_masking(ori_deps, args)
-                print(model.cal_mask_deps())
+                masked_deps = model.cal_mask_deps()
+                print(masked_deps)
+                print(rr_utils.cal_cc_flops(masked_deps)/rr_utils.cal_cc_flops(ori_deps))
             d = d.to(device)
             out_criterion, aux_loss = train_one_step(model, d, criterion, optimizer, aux_optimizer, args.lasso_strength, args.distributed, args.clip_max_norm)
 
