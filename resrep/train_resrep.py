@@ -101,11 +101,16 @@ def configure_optimizers(model, args):
         for n, p in model.named_parameters()
         if n.endswith(".quantiles") and p.requires_grad
     }
+    freezed_parameters = {
+        n
+        for n, p in model.named_parameters()
+        if not p.requires_grad
+    }
 
     # Make sure we don't have an intersection of parameters
     params_dict = dict(model.named_parameters())
     inter_params = parameters & aux_parameters
-    union_params = parameters | aux_parameters
+    union_params = parameters | aux_parameters | freezed_parameters
 
     assert len(inter_params) == 0
     assert len(union_params) - len(params_dict.keys()) == 0
@@ -323,6 +328,7 @@ def parse_args(argv):
     parser.add_argument("--lasso_strength", type=float, default=1e-9, help="penalty of lasso")
     parser.add_argument("--least_remain_channel", type=int, default=5, help="least remaining channel of each layer")
     parser.add_argument("--threshold", type=float, default=1e-5, help="penalty of lasso")
+    parser.add_argument("--freeze_main", action="store_true", help="whether freeze main")
 
     parser.add_argument('--world_size', default=1, type=int, help='number of distributed processes')
     parser.add_argument("--local_rank", default=0, type=int)
@@ -401,6 +407,14 @@ def main(argv):
     model = model.to(device)
     ori_deps = model.cal_deps()
     # print(ori_deps)
+
+    # freeze main path
+    if args.freeze_main:
+        for n, p in model.named_parameters():
+            if n.startswith('g_a') and not n.startswith('g_a.6'):
+                p.requires_grad = False
+            if n.startswith('g_s') and not n.startswith('g_s.0'):
+                p.requires_grad = False
 
     net_without_ddp = model
     if args.distributed:
