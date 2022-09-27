@@ -757,6 +757,230 @@ class CCResRep(CC):
         super().load_state_dict(cur_state_dict)
 
 
+class CCResRepWithoutY(CC):
+    def __init__(self, builder: RRBuilder, N=192, M=320, num_slices=10, max_support_slices=-1, **kwargs):
+        super().__init__(N, M, num_slices, max_support_slices, **kwargs)
+        self.slice_size = M//num_slices
+        self.N = N
+        self.M = M
+
+        self.g_a = nn.Sequential(
+            conv(3, N),
+            GDN(N),
+            conv(N, N),
+            GDN(N),
+            conv(N, N),
+            GDN(N),
+            conv(N, M),
+        )
+
+        self.g_s = nn.Sequential(
+            deconv(M, N),
+            GDN(N, inverse=True),
+            deconv(N, N),
+            GDN(N, inverse=True),
+            deconv(N, N),
+            GDN(N, inverse=True),
+            deconv(N, 3),
+        )
+
+        self.h_a = nn.Sequential(
+            builder.Conv2dRR(M, M, stride=1, padding=1),
+            nn.ReLU(),
+            builder.Conv2dRR(M, 256, kernel_size=5, stride=2, padding=2),
+            nn.ReLU(),
+            builder.Conv2dRR(256, N, kernel_size=5, stride=2, padding=2),
+        )
+
+        self.h_mean_s = nn.Sequential(
+            builder.ConvTranspose2dRR(N, N, kernel_size=5, stride=2, output_padding=1, padding=2),
+            nn.ReLU(),
+            builder.ConvTranspose2dRR(N, 256, kernel_size=5, stride=2, output_padding=1, padding=2),
+            nn.ReLU(),
+            builder.Conv2dRR(256, M, stride=1, padding=1),
+        )
+
+        self.h_scale_s = nn.Sequential(
+            builder.ConvTranspose2dRR(N, N, kernel_size=5, stride=2, output_padding=1, padding=2),
+            nn.ReLU(),
+            builder.ConvTranspose2dRR(N, 256, kernel_size=5, stride=2, output_padding=1, padding=2),
+            nn.ReLU(),
+            builder.Conv2dRR(256, M, stride=1, padding=1),
+        )
+
+        self.cc_mean_transforms = nn.ModuleList(
+            nn.Sequential(
+                builder.Conv2dRR(M + self.slice_size*i, 224 + self.slice_size*i*2//3, stride=1, padding=1),
+                nn.ReLU(),
+                builder.Conv2dRR(224 + self.slice_size*i*2//3, 128 + self.slice_size*i*1//3, stride=1, padding=1),
+                nn.ReLU(),
+                conv3x3(128 + 320//self.num_slices*i*1//3, 320//self.num_slices),
+            ) for i in range(self.num_slices)
+        )
+        self.cc_scale_transforms = nn.ModuleList(
+            nn.Sequential(
+                builder.Conv2dRR(M + self.slice_size*i, 224 + self.slice_size*i*2//3, stride=1, padding=1),
+                nn.ReLU(),
+                builder.Conv2dRR(224 + self.slice_size*i*2//3, 128 + self.slice_size*i*1//3, stride=1, padding=1),
+                nn.ReLU(),
+                conv3x3(128 + 320//self.num_slices*i*1//3, 320//self.num_slices),
+            ) for i in range(self.num_slices)
+        )
+
+        self.lrp_transforms = nn.ModuleList(
+            nn.Sequential(
+                builder.Conv2dRR(M + self.slice_size*(i+1), 224 + self.slice_size*i*2//3, stride=1, padding=1),
+                nn.ReLU(),
+                builder.Conv2dRR(224 + self.slice_size*i*2//3, 128 + self.slice_size*i*1//3, stride=1, padding=1),
+                nn.ReLU(),
+                conv3x3(128 + 320//self.num_slices*i*1//3, 320//self.num_slices),
+            ) for i in range(self.num_slices)
+        )
+
+        self.compactors = \
+            [(layer[1],) for layer in filter(lambda x: isinstance(x, nn.Sequential) and isinstance(x[1], CompactorLayer), self.h_a)] + \
+            [(layer[1],) for layer in filter(lambda x: isinstance(x, nn.Sequential) and isinstance(x[1], CompactorLayer), self.h_mean_s)] + \
+            [(layer[1],) for layer in filter(lambda x: isinstance(x, nn.Sequential) and isinstance(x[1], CompactorLayer), self.h_scale_s)] + \
+            [(self.cc_mean_transforms[i][0][1],) for i in range(self.num_slices)] + \
+            [(self.cc_mean_transforms[i][2][1],) for i in range(self.num_slices)] + \
+            [(self.cc_scale_transforms[i][0][1],) for i in range(self.num_slices)] + \
+            [(self.cc_scale_transforms[i][2][1],) for i in range(self.num_slices)] + \
+            [(self.lrp_transforms[i][0][1],) for i in range(self.num_slices)] + \
+            [(self.lrp_transforms[i][2][1],) for i in range(self.num_slices)]
+
+        self.suc_table = CC_tables.gene_table(self.num_slices, without_y=True)
+        self.group_compactor_names = {}
+
+    def gene_y_compactors(self, builder: RRBuilder):
+        return nn.ModuleList(builder.SingleCompactor(self.slice_size) for _ in range(self.num_slices))
+
+    def forward(self, x):
+        y = self.g_a(x)
+        y = self.compact_y(y)
+        z = self.h_a(y)
+        _, z_likelihoods = self.entropy_bottleneck(z)
+
+        # Use rounding (instead of uniform noise) to modify z before passing it
+        # to the hyper-synthesis transforms. Note that quantize() overrides the
+        # gradient to create a straight-through estimator.
+        z_offset = self.entropy_bottleneck._get_medians()
+        z_tmp = z - z_offset
+        z_hat = ste_round(z_tmp) + z_offset
+
+        latent_scales = self.h_scale_s(z_hat)
+        latent_means = self.h_mean_s(z_hat)
+
+        y_slices = self.split_slices(y)
+        y_hat_slices = []
+        y_likelihood = []
+
+        for slice_index, y_slice in enumerate(y_slices):
+            support_slices = (y_hat_slices if self.max_support_slices < 0 else y_hat_slices[:self.max_support_slices])
+            mean_support = torch.cat([latent_means] + support_slices, dim=1)
+            mu = self.cc_mean_transforms[slice_index](mean_support)
+
+            scale_support = torch.cat([latent_scales] + support_slices, dim=1)
+            scale = self.cc_scale_transforms[slice_index](scale_support)
+
+            _, y_slice_likelihood = self.gaussian_conditional(y_slice, scale, mu)
+            y_likelihood.append(y_slice_likelihood)
+            y_hat_slice = ste_round(y_slice - mu) + mu
+
+            lrp_support = torch.cat([mean_support, y_hat_slice], dim=1)
+            lrp = self.lrp_transforms[slice_index](lrp_support)
+            lrp = 0.5 * torch.tanh(lrp)
+            y_hat_slice += lrp
+
+            y_hat_slices.append(y_hat_slice)
+
+        y_hat = torch.cat(y_hat_slices, dim=1)
+        y_likelihoods = torch.cat(y_likelihood, dim=1)
+        x_hat = self.g_s(y_hat)
+
+        return {
+            "x_hat": x_hat,
+            "likelihoods": {"y": y_likelihoods, "z": z_likelihoods},
+        }
+
+    def compact_y(self, ori_y):
+        y = torch.zeros_like(ori_y)
+        for i in range(self.num_slices):
+            y[:, i*self.slice_size:(i+1)*self.slice_size] = self.y_compactors[i](ori_y[:, i*self.slice_size:(i+1)*self.slice_size])
+        return y
+
+    def resrep_masking(self, ori_deps, args):
+        ori_flops = cal_cc_flops(ori_deps)
+        scores = cal_compactor_scores(self.compactors)
+        cur_deps = self.cal_mask_deps()
+        sorted_keys = sorted(scores, key=scores.get)
+        cur_flops = cal_cc_flops(cur_deps)
+
+        # 这步保证了不会过度裁剪
+        if cur_flops <= args.flops_target * ori_flops:
+            return
+
+        i = 0
+        for key in sorted_keys:
+            if i == args.num_per_mask:
+                break
+            if self.compactors[key[0]][0].mask[key[1]] == 0: # already masked, skip
+                continue
+            i += 1
+            if self.compactors[key[0]][0].get_num_mask_ones() <= args.least_remain_channel: # no more channel in this layer should be masked
+                continue
+            
+            # 按组mask
+            for compactor in self.compactors[key[0]]:
+                compactor.set_mask_to_zero(key[1]) # mask the channel
+
+    def cal_deps(self, thr=1e-5):
+        deps = {
+            'h_a': [get_remain(layer[1], thr) for layer in filter(lambda x: isinstance(x, nn.Sequential) and isinstance(x[1], CompactorLayer), self.h_a)],
+            'h_mean_s': [get_remain(layer[1], thr) for layer in filter(lambda x: isinstance(x, nn.Sequential) and isinstance(x[1], CompactorLayer), self.h_mean_s)],
+            'h_scale_s': [get_remain(layer[1], thr) for layer in filter(lambda x: isinstance(x, nn.Sequential) and isinstance(x[1], CompactorLayer), self.h_scale_s)],
+            # 这里没有算每个transforms的最后一层，统一放在后面计算
+            'cc_mean_transforms': [[get_remain(layer[1], thr) for layer in filter(lambda x: isinstance(x, nn.Sequential) and isinstance(x[1], CompactorLayer), cc_mean_transform[:-1])] for cc_mean_transform in self.cc_mean_transforms],
+            'cc_scale_transforms': [[get_remain(layer[1], thr) for layer in filter(lambda x: isinstance(x, nn.Sequential) and isinstance(x[1], CompactorLayer), cc_scale_transform[:-1])] for cc_scale_transform in self.cc_scale_transforms],
+            'lrp_transforms': [[get_remain(layer[1], thr) for layer in filter(lambda x: isinstance(x, nn.Sequential) and isinstance(x[1], CompactorLayer), lrp_transform[:-1])] for lrp_transform in self.lrp_transforms],
+        }
+        # 计算latent representation的输出通道
+        # 这步是为了计算的时候让相同组compactor最后计算出来的通道数一样，保证deps的正确性，如果pruning部分改了实现方法，这里也需要修改
+        deps['y'] = self.M
+        for i in range(self.num_slices):
+            deps['cc_mean_transforms'][i].append(self.slice_size)
+            deps['cc_scale_transforms'][i].append(self.slice_size)
+            deps['lrp_transforms'][i].append(self.slice_size)
+        return deps
+
+    def cal_mask_deps(self):
+        return {
+            'y': self.M,
+            'h_a': [layer[1].get_num_mask_ones() for layer in filter(lambda x: isinstance(x, nn.Sequential) and isinstance(x[1], CompactorLayer), self.h_a)],
+            'h_mean_s': [layer[1].get_num_mask_ones() for layer in filter(lambda x: isinstance(x, nn.Sequential) and isinstance(x[1], CompactorLayer), self.h_mean_s)],
+            'h_scale_s': [layer[1].get_num_mask_ones() for layer in filter(lambda x: isinstance(x, nn.Sequential) and isinstance(x[1], CompactorLayer), self.h_scale_s)],
+            'cc_mean_transforms': [[layer[1].get_num_mask_ones() for layer in filter(lambda x: isinstance(x, nn.Sequential) and isinstance(x[1], CompactorLayer), cc_mean_transform)] for cc_mean_transform in self.cc_mean_transforms],
+            'cc_scale_transforms': [[layer[1].get_num_mask_ones() for layer in filter(lambda x: isinstance(x, nn.Sequential) and isinstance(x[1], CompactorLayer), cc_scale_transform)] for cc_scale_transform in self.cc_scale_transforms],
+            'lrp_transforms': [[layer[1].get_num_mask_ones() for layer in filter(lambda x: isinstance(x, nn.Sequential) and isinstance(x[1], CompactorLayer), lrp_transform)] for lrp_transform in self.lrp_transforms],
+        }
+
+    def load_pretrained(self, state_dict):
+        update_registered_buffers(
+            self.gaussian_conditional,
+            "gaussian_conditional",
+            ["_quantized_cdf", "_offset", "_cdf_length", "scale_table"],
+            state_dict,
+        )
+        cur_state_dict = self.state_dict()
+        for k in state_dict:
+            if k not in cur_state_dict:
+                cur_k = k.rsplit('.', 1)[0]+'.conv.'+k.rsplit('.', 1)[1]
+                assert cur_k in cur_state_dict
+                cur_state_dict[cur_k] = state_dict[k]
+            else:
+                cur_state_dict[k] = state_dict[k]
+        super().load_state_dict(cur_state_dict)
+
+
 class CCEnhancedResRep(CCResRep):
     def __init__(self, builder: RRBuilder, N=192, M=320, num_slices=10, max_support_slices=-1, **kwargs):
         super().__init__(builder, N, M, num_slices, max_support_slices, **kwargs)

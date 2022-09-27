@@ -454,7 +454,7 @@ def main(argv):
 
         # debug
         # pruned_save_name = args.save_path[:-8] + '_pruned_' + str(epoch) + args.save_path[-8:]
-        # save_checkpoint(rr_utils.cc_model_prune(model, ori_deps, args.threshold, enhanced_resrep='enhance' in args.model), pruned_save_name)
+        # save_checkpoint(rr_utils.cc_model_prune(model, ori_deps, args.threshold, enhanced_resrep='enhance' in args.model, without_y='without_y' in args.model), pruned_save_name)
 
         for i, d in enumerate(train_dataloader):
             resrep_step = step - args.resrep_warmup_step
@@ -508,7 +508,9 @@ def main(argv):
                     },
                     save_name
                 )
-                save_checkpoint(rr_utils.cc_model_prune(model, ori_deps, args.threshold, enhanced_resrep='enhance' in args.model), pruned_save_name)
+                save_checkpoint(
+                    rr_utils.cc_model_prune(model, ori_deps, args.threshold, enhanced_resrep='enhance' in args.model, without_y='without_y' in args.model),
+                    pruned_save_name)
         if args.distributed:
             dist.barrier()
 

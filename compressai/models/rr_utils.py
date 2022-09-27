@@ -67,7 +67,7 @@ def cal_cc_flops(deps):
     return flops
 
 
-def cc_model_prune(model, ori_deps, thresh, enhanced_resrep):
+def cc_model_prune(model, ori_deps, thresh, enhanced_resrep, without_y=False):
     table = model.suc_table
     num_slices = model.num_slices
     already_pruned_suc = set()
@@ -84,7 +84,7 @@ def cc_model_prune(model, ori_deps, thresh, enhanced_resrep):
     for k, v in cur_state_dict.items():
         v = v.detach().cpu()
         save_dict[k] = v
-    save_dict = CC_tables.pre_split_before_pruning(save_dict, num_slices, enhanced_resrep)
+    save_dict = CC_tables.pre_split_before_pruning(save_dict, num_slices, enhanced_resrep, without_y)
 
     for k, v in table.items():
         if k in model.group_compactor_names:
@@ -139,7 +139,7 @@ def cc_model_prune(model, ori_deps, thresh, enhanced_resrep):
             else:
                 suc_weight = suc_weight[survived_ids.long()]
             save_dict[suc_weight_name] = suc_weight
-    save_dict = CC_tables.post_combine_after_pruning(save_dict, num_slices)
+    save_dict = CC_tables.post_combine_after_pruning(save_dict, num_slices, without_y)
 
     already_proc = set()
     for k, v in table.items():
