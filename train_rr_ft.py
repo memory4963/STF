@@ -32,10 +32,8 @@ from torch.utils.data.distributed import DistributedSampler
 from torchvision import transforms
 
 from compressai.datasets import ImageFolder
-from compressai.models import rr_utils
 from compressai.zoo import models
 import compressai.utils as utils
-from resrep.rr_builder import CompactorLayer, RRBuilder
 
 
 class RateDistortionLoss(nn.Module):
@@ -87,30 +85,25 @@ class CustomDataParallel(nn.DataParallel):
             return getattr(self.module, key)
 
 
-def configure_optimizers(model, args):
+def configure_optimizers(net, args):
     """Separate parameters for the main optimizer and the auxiliary optimizer.
     Return two optimizers"""
 
     parameters = {
         n
-        for n, p in model.named_parameters()
+        for n, p in net.named_parameters()
         if not n.endswith(".quantiles") and p.requires_grad
     }
     aux_parameters = {
         n
-        for n, p in model.named_parameters()
+        for n, p in net.named_parameters()
         if n.endswith(".quantiles") and p.requires_grad
-    }
-    freezed_parameters = {
-        n
-        for n, p in model.named_parameters()
-        if not p.requires_grad
     }
 
     # Make sure we don't have an intersection of parameters
-    params_dict = dict(model.named_parameters())
+    params_dict = dict(net.named_parameters())
     inter_params = parameters & aux_parameters
-    union_params = parameters | aux_parameters | freezed_parameters
+    union_params = parameters | aux_parameters
 
     assert len(inter_params) == 0
     assert len(union_params) - len(params_dict.keys()) == 0
@@ -156,7 +149,7 @@ def train_one_epoch(
         aux_loss.backward()
         aux_optimizer.step()
 
-        if i % 10 == 0 and utils.is_main_process():
+        if i % 100 == 0 and utils.is_main_process():
             now_time = time()
             left_time = int((now_time-start_time)/(i-pre_step)*(len(train_dataloader)-i))
             start_time = now_time
@@ -171,32 +164,6 @@ def train_one_epoch(
                 f'\tAux loss: {aux_loss.item():.2f}'
                 f'\tETA: {left_time//3600}:{(left_time%3600)//60}:{left_time%60}'
             )
-
-
-def train_one_step(model, d, criterion, optimizer, aux_optimizer, lasso_strength, distributed, clip_max_norm):
-    optimizer.zero_grad()
-    aux_optimizer.zero_grad()
-
-    out_net = model(d)
-
-    out_criterion = criterion(out_net, d)
-    out_criterion["loss"].backward()
-    aux_loss = model.module.aux_loss() if distributed else model.aux_loss()
-    aux_loss.backward()
-
-    if clip_max_norm > 0:
-        torch.nn.utils.clip_grad_norm_(model.parameters(), clip_max_norm)
-
-    for group in model.compactors:
-        for compactor in group:
-            # mask掉的通道只会继续被降低，丢掉正常的loss
-            compactor.mask_weight_grad()
-            compactor.add_lasso_penalty(lasso_strength)
-
-    optimizer.step()
-    aux_optimizer.step()
-
-    return out_criterion, aux_loss
 
 
 def test_epoch(epoch, test_dataloader, model, criterion):
@@ -229,10 +196,12 @@ def test_epoch(epoch, test_dataloader, model, criterion):
     return loss.avg
 
 
-def save_checkpoint(state, filename):
+def save_checkpoint(state, is_best, filename):
     if not os.path.exists(os.path.dirname(filename)):
         os.makedirs(os.path.dirname(filename))
     torch.save(state, filename)
+    if is_best:
+        shutil.copyfile(filename, filename[:-8]+"_best"+filename[-8:])
 
 
 def parse_args(argv):
@@ -317,19 +286,9 @@ def parse_args(argv):
         help="gradient clipping max norm (default: %(default)s",
     )
     parser.add_argument("--checkpoint", type=str, help="Path to a checkpoint")
-    parser.add_argument("--pretrained", type=str, help="Path to a pretrained model")
-
-    parser.add_argument("--resrep_warmup_step", type=int, default=1000, help="step num before resrep pruning")
-    parser.add_argument("--mask_interval", type=int, default=1500, help="step num before resrep pruning")
-    parser.add_argument("--flops_target", type=float, default=0.3, help="fraction of keeping flops")
-    parser.add_argument("--num_per_mask", type=int, default=20, help="channels to prune each time")
-    parser.add_argument("--lasso_strength", type=float, default=1e-9, help="penalty of lasso")
-    parser.add_argument("--least_remain_channel", type=int, default=5, help="least remaining channel of each layer")
-    parser.add_argument("--threshold", type=float, default=1e-5, help="penalty of lasso")
-    parser.add_argument("--freeze_main", action="store_true", help="whether freeze main")
-
+    parser.add_argument("--pretrained", type=str, help="Path to a pretrained ckpt")
     parser.add_argument('--world_size', default=1, type=int, help='number of distributed processes')
-    parser.add_argument("--local_rank", default=0, type=int)
+    parser.add_argument( "--local_rank", default=0, type=int)
     parser.add_argument('--dist_url', default='env://', help='url used to set up distributed training')
     parser.add_argument('--distributed', action='store_false')
     args = parser.parse_args(argv)
@@ -399,118 +358,85 @@ def main(argv):
             shuffle=False,
             pin_memory=(device == "cuda"),
         )
-    
 
-    model = models[args.model](RRBuilder(), num_slices=args.num_slices)
-    model = model.to(device)
-    ori_deps = model.cal_deps()
-    print(ori_deps)
-
-    # freeze main path
-    if args.freeze_main:
-        for n, p in model.named_parameters():
-            if n.startswith('g_a') and not n.startswith('g_a.6'):
-                p.requires_grad = False
-            if n.startswith('g_s') and not n.startswith('g_s.0'):
-                p.requires_grad = False
-
-    net_without_ddp = model
-    if args.distributed:
-        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
-        net_without_ddp = model.module
-
-    optimizer, aux_optimizer = configure_optimizers(model, args)
-    # Settings of ResRep
-    lr_scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs*len(train_dataloader))
-    criterion = RateDistortionLoss()
-
-    last_epoch = 0
     if args.pretrained and os.path.exists(args.pretrained):
         if utils.is_main_process():
             print("Loading", args.pretrained)
-        state_dict = torch.load(args.pretrained, map_location=device)['state_dict']
-        model.load_pretrained(state_dict)
-
-    if args.checkpoint and os.path.exists(args.checkpoint):  # load from previous checkpoint
+        ckpt = torch.load(args.pretrained)
+        deps = ckpt['deps']
+        print(deps)
+        state_dict = ckpt['state_dict']
+        net = models[args.model].from_state_dict(state_dict, deps)
+    elif args.checkpoint and os.path.exists(args.checkpoint):
         if utils.is_main_process():
             print("Loading", args.checkpoint)
         checkpoint = torch.load(args.checkpoint, map_location=device)
-        last_epoch = checkpoint["epoch"] + 1
-        model.load_state_dict(checkpoint["state_dict"])
+        deps = ckpt['deps']
+        print(deps)
+        state_dict = ckpt['state_dict']
+        net = models[args.model].from_state_dict(state_dict, deps)
+    else:
+        raise Exception("Must start from a pretrained model or a ckpt!")
+    net = net.to(device)
 
+    net_without_ddp = net
+    if args.distributed:
+        net = torch.nn.parallel.DistributedDataParallel(net, device_ids=[args.gpu])
+        net_without_ddp = net.module
+
+    optimizer, aux_optimizer = configure_optimizers(net, args)
+    # CC的settings # by LUO
+    lr_scheduler = optim.lr_scheduler.MultiStepLR(optimizer, [20, 25, 30, 33], gamma=1/3)
+    criterion = RateDistortionLoss()
+
+    last_epoch = 0
+    if args.checkpoint and os.path.exists(args.checkpoint):  # load from previous checkpoint
+        checkpoint = torch.load(args.checkpoint, map_location=device)
+        last_epoch = checkpoint["epoch"] + 1
         optimizer.load_state_dict(checkpoint["optimizer"])
         aux_optimizer.load_state_dict(checkpoint["aux_optimizer"])
         lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
 
-    step = last_epoch*len(train_dataloader)
+    best_loss = float("inf")
     for epoch in range(last_epoch, args.epochs):
+        # CC中是这么做的 # by LUO
+        if epoch < args.epochs // 2:
+            criterion.lmbda = 2*args.lmbda
+        else:
+            criterion.lmbda = args.lmbda
+
         if utils.is_main_process():
             print(f"Learning rate: {optimizer.param_groups[0]['lr']}")
+        train_one_epoch(
+            net,
+            criterion,
+            train_dataloader,
+            optimizer,
+            aux_optimizer,
+            epoch,
+            args
+        )
+        lr_scheduler.step()
 
-        model.train()
-        device = next(model.parameters()).device
-        start_time = time()
-        pre_step = -1
-
-        # debug
-        # pruned_save_name = args.save_path[:-8] + '_pruned_' + str(epoch) + args.save_path[-8:]
-        # save_checkpoint(rr_utils.cc_model_prune(model, ori_deps, args.threshold, enhanced_resrep='enhance' in args.model, without_y='without_y' in args.model), pruned_save_name)
-
-        for i, d in enumerate(train_dataloader):
-            resrep_step = step - args.resrep_warmup_step
-            if resrep_step > 0 and resrep_step % args.mask_interval == 0:
-                print(f'update mask at step {step}')
-                model.resrep_masking(ori_deps, args)
-                masked_deps = model.cal_mask_deps()
-                print(masked_deps)
-                print(rr_utils.cal_cc_flops(masked_deps)/rr_utils.cal_cc_flops(ori_deps))
-            d = d.to(device)
-            out_criterion, aux_loss = train_one_step(model, d, criterion, optimizer, aux_optimizer, args.lasso_strength, args.distributed, args.clip_max_norm)
-
-            if i % 100 == 0 and utils.is_main_process():
-                now_time = time()
-                left_time = int((now_time-start_time)/(i-pre_step)*(len(train_dataloader)-i))
-                start_time = now_time
-                pre_step = i
-                print(
-                    f'Train epoch {epoch}: ['
-                    f'{i*len(d)}/{len(train_dataloader.dataset)}'
-                    f' ({100. * i / len(train_dataloader):.0f}%)]'
-                    f'\tLoss: {out_criterion["loss"].item():.3f} |'
-                    f'\tMSE loss: {out_criterion["mse_loss"].item() * 255 ** 2 / 3:.3f} |'
-                    f'\tBpp loss: {out_criterion["bpp_loss"].item():.2f} |'
-                    f'\tAux loss: {aux_loss.item():.2f}'
-                    f'\tETA: {left_time//3600}:{(left_time%3600)//60}:{left_time%60}'
-                )
-
-            lr_scheduler.step()
-            step += 1
-
-        if utils.is_main_process() and ((epoch+1) % 10 == 0 or epoch == args.epochs-1):
+        if utils.is_main_process():
             loss = test_epoch(epoch, test_dataloader, net_without_ddp, criterion)
 
+            is_best = loss < best_loss
+            best_loss = min(loss, best_loss)
+
             if args.save:
-                if args.save_path.endswith('.pth.tar'):
-                    save_name = args.save_path[:-8] + '_' + str(epoch) + args.save_path[-8:]
-                    pruned_save_name = args.save_path[:-8] + '_pruned_' + str(epoch) + args.save_path[-8:]
-                else:
-                    save_name = args.save_path.rsplit('.', 1)[0] + '_' + str(epoch) + args.save_path.rsplit('.', 1)[1]
-                    pruned_save_name = args.save_path.rsplit('.', 1)[0] + '_pruned_' + str(epoch) + args.save_path.rsplit('.', 1)[1]
                 save_checkpoint(
                     {
                         "epoch": epoch,
-                        "state_dict": model.state_dict(),
+                        "state_dict": net.state_dict(),
                         "loss": loss,
                         "optimizer": optimizer.state_dict(),
                         "aux_optimizer": aux_optimizer.state_dict(),
                         "lr_scheduler": lr_scheduler.state_dict(),
-                        "deps": model.cal_deps()
                     },
-                    save_name
+                    is_best,
+                    args.save_path,
                 )
-                save_checkpoint(
-                    rr_utils.cc_model_prune(model, ori_deps, args.threshold, enhanced_resrep='enhance' in args.model, without_y='without_y' in args.model),
-                    pruned_save_name)
         if args.distributed:
             dist.barrier()
 
