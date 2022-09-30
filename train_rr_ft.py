@@ -370,7 +370,7 @@ def main(argv):
     elif args.checkpoint and os.path.exists(args.checkpoint):
         if utils.is_main_process():
             print("Loading", args.checkpoint)
-        checkpoint = torch.load(args.checkpoint, map_location=device)
+        ckpt = torch.load(args.checkpoint, map_location=device)
         deps = ckpt['deps']
         print(deps)
         state_dict = ckpt['state_dict']
@@ -391,11 +391,11 @@ def main(argv):
 
     last_epoch = 0
     if args.checkpoint and os.path.exists(args.checkpoint):  # load from previous checkpoint
-        checkpoint = torch.load(args.checkpoint, map_location=device)
-        last_epoch = checkpoint["epoch"] + 1
-        optimizer.load_state_dict(checkpoint["optimizer"])
-        aux_optimizer.load_state_dict(checkpoint["aux_optimizer"])
-        lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
+        ckpt = torch.load(args.checkpoint, map_location=device)
+        last_epoch = ckpt["epoch"] + 1
+        optimizer.load_state_dict(ckpt["optimizer"])
+        aux_optimizer.load_state_dict(ckpt["aux_optimizer"])
+        lr_scheduler.load_state_dict(ckpt["lr_scheduler"])
 
     best_loss = float("inf")
     for epoch in range(last_epoch, args.epochs):
@@ -433,6 +433,7 @@ def main(argv):
                         "optimizer": optimizer.state_dict(),
                         "aux_optimizer": aux_optimizer.state_dict(),
                         "lr_scheduler": lr_scheduler.state_dict(),
+                        "deps": deps,
                     },
                     is_best,
                     args.save_path,
