@@ -198,7 +198,7 @@ class CC(CompressionModel):
         latent_scales = self.h_scale_s(z_hat)
         latent_means = self.h_mean_s(z_hat)
 
-        y_slices = y.chunk(self.num_slices, 1)
+        y_slices = self.split_slices(y)
         y_hat_slices = []
         y_scales = []
         y_means = []
