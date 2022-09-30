@@ -94,7 +94,7 @@ class CompactorLayer(nn.Module):
 
     def mask_weight_grad(self):
         weight = self.get_pwc_kernel()
-        weight.data.grad = torch.einsum('i,ijkl->ijkl', self.mask, weight.grad.data)
+        weight.grad.data = torch.einsum('i,ijkl->ijkl', self.mask, weight.grad.data)
 
     def add_lasso_penalty(self, lasso_strength):
         weight = self.get_pwc_kernel()
