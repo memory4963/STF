@@ -851,12 +851,8 @@ class CCResRepWithoutY(CC):
         self.suc_table = CC_tables.gene_table(self.num_slices, without_y=True)
         self.group_compactor_names = {}
 
-    def gene_y_compactors(self, builder: RRBuilder):
-        return nn.ModuleList(builder.SingleCompactor(self.slice_size) for _ in range(self.num_slices))
-
     def forward(self, x):
         y = self.g_a(x)
-        y = self.compact_y(y)
         z = self.h_a(y)
         _, z_likelihoods = self.entropy_bottleneck(z)
 
@@ -935,6 +931,7 @@ class CCResRepWithoutY(CC):
 
     def cal_deps(self, thr=1e-5):
         deps = {
+            'y': self.M,
             'h_a': [get_remain(layer[1], thr) for layer in filter(lambda x: isinstance(x, nn.Sequential) and isinstance(x[1], CompactorLayer), self.h_a)],
             'h_mean_s': [get_remain(layer[1], thr) for layer in filter(lambda x: isinstance(x, nn.Sequential) and isinstance(x[1], CompactorLayer), self.h_mean_s)],
             'h_scale_s': [get_remain(layer[1], thr) for layer in filter(lambda x: isinstance(x, nn.Sequential) and isinstance(x[1], CompactorLayer), self.h_scale_s)],
@@ -945,7 +942,6 @@ class CCResRepWithoutY(CC):
         }
         # 计算latent representation的输出通道
         # 这步是为了计算的时候让相同组compactor最后计算出来的通道数一样，保证deps的正确性，如果pruning部分改了实现方法，这里也需要修改
-        deps['y'] = self.M
         for i in range(self.num_slices):
             deps['cc_mean_transforms'][i].append(self.slice_size)
             deps['cc_scale_transforms'][i].append(self.slice_size)
@@ -953,7 +949,7 @@ class CCResRepWithoutY(CC):
         return deps
 
     def cal_mask_deps(self):
-        return {
+        deps = {
             'y': self.M,
             'h_a': [layer[1].get_num_mask_ones() for layer in filter(lambda x: isinstance(x, nn.Sequential) and isinstance(x[1], CompactorLayer), self.h_a)],
             'h_mean_s': [layer[1].get_num_mask_ones() for layer in filter(lambda x: isinstance(x, nn.Sequential) and isinstance(x[1], CompactorLayer), self.h_mean_s)],
@@ -962,6 +958,11 @@ class CCResRepWithoutY(CC):
             'cc_scale_transforms': [[layer[1].get_num_mask_ones() for layer in filter(lambda x: isinstance(x, nn.Sequential) and isinstance(x[1], CompactorLayer), cc_scale_transform)] for cc_scale_transform in self.cc_scale_transforms],
             'lrp_transforms': [[layer[1].get_num_mask_ones() for layer in filter(lambda x: isinstance(x, nn.Sequential) and isinstance(x[1], CompactorLayer), lrp_transform)] for lrp_transform in self.lrp_transforms],
         }
+        for i in range(self.num_slices):
+            deps['cc_mean_transforms'][i].append(self.slice_size)
+            deps['cc_scale_transforms'][i].append(self.slice_size)
+            deps['lrp_transforms'][i].append(self.slice_size)
+        return deps
 
     def load_pretrained(self, state_dict):
         update_registered_buffers(
