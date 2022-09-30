@@ -378,6 +378,10 @@ def main(argv):
             print("Loading", args.pretrained)
         state_dict = torch.load(args.pretrained, map_location=device)['state_dict']
         print(net.load_state_dict(state_dict))
+        if 'cc' in args.model:
+            # 更高一级的q的到的模型
+            last_epoch = args.epochs // 2
+            lr_scheduler.step(last_epoch)
 
     if args.checkpoint and os.path.exists(args.checkpoint):  # load from previous checkpoint
         if utils.is_main_process():
