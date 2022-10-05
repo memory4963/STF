@@ -20,7 +20,9 @@ import math
 import os
 import sys
 import time
+import matplotlib.pyplot as plt
 
+import numpy as np
 from collections import defaultdict
 from typing import List
 
@@ -138,6 +140,7 @@ def inference_entropy_estimation(model, x):
         (torch.log(likelihoods).sum() / (-math.log(2) * num_pixels))
         for likelihoods in out_net["likelihoods"].values()
     )
+    plt_energy(out_net, model.num_slices)
 
     return {
         "psnr": psnr(x, out_net["x_hat"]),
@@ -150,6 +153,28 @@ def inference_entropy_estimation(model, x):
 def load_checkpoint(arch: str, checkpoint_path: str) -> nn.Module:
     state_dict = load_state_dict(torch.load(checkpoint_path)['state_dict'])
     return models[arch].from_state_dict(state_dict).eval()
+
+
+def plt_energy(out_net, slice_num=10):
+    y_likelihoods = torch.log(out_net['likelihoods']['y'])
+    y_slices = y_likelihoods.chunk(slice_num, 1)
+    energy = torch.sum(y_likelihoods ** 2, dim=(2,3))
+    energy = energy.detach().cpu().numpy()[0]
+    x = range(energy.shape[0])
+    plt.figure()
+    plt.subplot(1,2,1)
+    plt.bar(x,energy)
+    plt.title("total")
+
+    energy_list = []
+    for y_slice in y_slices:
+        energy_slice = np.sum(y_slice.detach().cpu().numpy()**2)
+        energy_list.append(energy_slice)
+    x = range(slice_num)
+    plt.subplot(1,2,2)
+    plt.bar(x,energy_list)
+    plt.title("each slice")
+    plt.savefig("y_entropy_ori.png")
 
 
 def eval_model(model, filepaths, entropy_estimation=False, half=False, recon_path='reconstruction'):

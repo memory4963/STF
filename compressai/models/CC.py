@@ -1081,6 +1081,12 @@ class CCResRepPruned(CC):
         for i in range(self.num_slices):
             splits.append(self.deps['lrp_transforms'][i][2])
         return y.split(splits, dim=1)
+    
+    def gene_splits(self):
+        splits = []
+        for i in range(self.num_slices):
+            splits.append(self.deps['lrp_transforms'][i][2])
+        return splits
 
     @classmethod
     def from_state_dict(cls, state_dict, deps):
