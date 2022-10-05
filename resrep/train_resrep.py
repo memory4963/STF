@@ -326,6 +326,7 @@ def parse_args(argv):
     parser.add_argument("--lasso_strength", type=float, default=1e-9, help="penalty of lasso")
     parser.add_argument("--least_remain_channel", type=int, default=5, help="least remaining channel of each layer")
     parser.add_argument("--threshold", type=float, default=1e-5, help="penalty of lasso")
+    parser.add_argument("--slow_start", type=int, default=100, help="slow start for pruning to avoid performance crash")
     parser.add_argument("--freeze_main", action="store_true", help="whether freeze main")
 
     parser.add_argument('--world_size', default=1, type=int, help='number of distributed processes')
@@ -443,6 +444,11 @@ def main(argv):
         lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
 
     step = last_epoch*len(train_dataloader)
+
+    num_per_mask = args.num_per_mask
+    args.num_per_mask = num_per_mask // 2
+    mask_interval = args.mask_interval 
+    args.mask_interval = mask_interval * 2
     for epoch in range(last_epoch, args.epochs):
         if utils.is_main_process():
             print(f"Learning rate: {optimizer.param_groups[0]['lr']}")
@@ -459,6 +465,18 @@ def main(argv):
         for i, d in enumerate(train_dataloader):
             resrep_step = step - args.resrep_warmup_step
             if resrep_step > 0 and resrep_step % args.mask_interval == 0:
+
+                # 慢启动, 一开始1/4的剪枝速度，然后1/2，然后正常速度
+                if resrep_step // (mask_interval*2) > args.slow_start:
+                    args.num_per_mask = num_per_mask
+                    args.mask_interval = mask_interval
+                elif resrep_step // (mask_interval*2) > args.slow_start // 2:
+                    args.num_per_mask = num_per_mask
+                    args.mask_interval = mask_interval * 2
+                else:
+                    args.num_per_mask = num_per_mask // 2
+                    args.mask_interval = mask_interval * 2
+
                 print(f'update mask at step {step}')
                 model.resrep_masking(ori_deps, args)
                 masked_deps = model.cal_mask_deps()
