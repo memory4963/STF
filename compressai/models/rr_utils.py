@@ -5,8 +5,8 @@ import torch
 import torch.nn.functional as F
 
 
-def get_remain(vec: CompactorLayer, thr):
-    return np.sum(vec.get_metric_vector() >= thr)
+def get_remain(vec: CompactorLayer, thr, min_channel=1):
+    return max(min_channel, np.sum(vec.get_metric_vector() >= thr))
 
 
 def get_group_remain(compactors, thr):
@@ -67,12 +67,12 @@ def cal_cc_flops(deps):
     return flops
 
 
-def cc_model_prune(model, ori_deps, thresh, enhanced_resrep, without_y=False):
+def cc_model_prune(model, ori_deps, thresh, enhanced_resrep, without_y=False, least_num=1):
     table = model.suc_table
     num_slices = model.num_slices
     already_pruned_suc = set()
 
-    pruned_deps = model.cal_deps(thr=thresh)
+    pruned_deps = model.cal_deps(thr=thresh, min_channel=least_num)
     pruned_flops = cal_cc_flops(pruned_deps)
     ori_flops = cal_cc_flops(ori_deps)
     print('pruned deps: ')
@@ -99,7 +99,7 @@ def cc_model_prune(model, ori_deps, thresh, enhanced_resrep, without_y=False):
                 if v['weight'] not in k1:
                     continue
                 weight = save_dict[k1]
-                pruned_weight, pruned_bias, survived_ids = fold_conv(weight, None, thresh, compactor, not v['conv'])
+                pruned_weight, pruned_bias, survived_ids = fold_conv(weight, None, thresh, compactor, not v['conv'], least_num)
                 save_dict[k1] = pruned_weight
             save_dict[v['bias']] = save_dict[v['bias']][survived_ids.long()]
         else:
@@ -111,7 +111,7 @@ def cc_model_prune(model, ori_deps, thresh, enhanced_resrep, without_y=False):
                 bias_name = v['bias']
             weight = save_dict[weight_name]
             bias = save_dict[bias_name]
-            pruned_weight, pruned_bias, survived_ids = fold_conv(weight, bias, thresh, compactor, not v['conv'])
+            pruned_weight, pruned_bias, survived_ids = fold_conv(weight, bias, thresh, compactor, not v['conv'], least_num)
             save_dict[weight_name] = pruned_weight
             save_dict[bias_name] = pruned_bias
 
@@ -159,7 +159,7 @@ def cc_model_prune(model, ori_deps, thresh, enhanced_resrep, without_y=False):
     return final_dict
 
 
-def fold_conv(fused_k, fused_b, thresh, compactor_mat, deconv=False):
+def fold_conv(fused_k, fused_b, thresh, compactor_mat, deconv=False, min_channel=1):
     # 只要有一个compactor中的这个channel超过阈值就保留
     if isinstance(compactor_mat, list):
         metric_vec = torch.sqrt(torch.sum(compactor_mat[0] ** 2, axis=(1, 2, 3))) > thresh
@@ -171,7 +171,7 @@ def fold_conv(fused_k, fused_b, thresh, compactor_mat, deconv=False):
         metric_vec = torch.sqrt(torch.sum(compactor_mat ** 2, axis=(1, 2, 3)))
         filter_ids_higher_thresh = torch.where(metric_vec > thresh)[0]
 
-    if len(filter_ids_higher_thresh) < 1:
+    if len(filter_ids_higher_thresh) < min_channel:
         sortd_ids = torch.argsort(metric_vec)
         filter_ids_higher_thresh = sortd_ids[-1:]
 

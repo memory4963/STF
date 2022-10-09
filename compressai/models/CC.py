@@ -708,15 +708,15 @@ class CCResRep(CC):
             for compactor in self.compactors[key[0]]:
                 compactor.set_mask_to_zero(key[1]) # mask the channel
 
-    def cal_deps(self, thr=1e-5):
+    def cal_deps(self, thr=1e-5, min_channel=1):
         deps = {
-            'h_a': [get_remain(layer[1], thr) for layer in filter(lambda x: isinstance(x, nn.Sequential) and isinstance(x[1], CompactorLayer), self.h_a)],
-            'h_mean_s': [get_remain(layer[1], thr) for layer in filter(lambda x: isinstance(x, nn.Sequential) and isinstance(x[1], CompactorLayer), self.h_mean_s)],
-            'h_scale_s': [get_remain(layer[1], thr) for layer in filter(lambda x: isinstance(x, nn.Sequential) and isinstance(x[1], CompactorLayer), self.h_scale_s)],
+            'h_a': [get_remain(layer[1], thr, min_channel) for layer in filter(lambda x: isinstance(x, nn.Sequential) and isinstance(x[1], CompactorLayer), self.h_a)],
+            'h_mean_s': [get_remain(layer[1], thr, min_channel) for layer in filter(lambda x: isinstance(x, nn.Sequential) and isinstance(x[1], CompactorLayer), self.h_mean_s)],
+            'h_scale_s': [get_remain(layer[1], thr, min_channel) for layer in filter(lambda x: isinstance(x, nn.Sequential) and isinstance(x[1], CompactorLayer), self.h_scale_s)],
             # 这里没有算每个transforms的最后一层，统一放在后面计算
-            'cc_mean_transforms': [[get_remain(layer[1], thr) for layer in filter(lambda x: isinstance(x, nn.Sequential) and isinstance(x[1], CompactorLayer), cc_mean_transform[:-1])] for cc_mean_transform in self.cc_mean_transforms],
-            'cc_scale_transforms': [[get_remain(layer[1], thr) for layer in filter(lambda x: isinstance(x, nn.Sequential) and isinstance(x[1], CompactorLayer), cc_scale_transform[:-1])] for cc_scale_transform in self.cc_scale_transforms],
-            'lrp_transforms': [[get_remain(layer[1], thr) for layer in filter(lambda x: isinstance(x, nn.Sequential) and isinstance(x[1], CompactorLayer), lrp_transform[:-1])] for lrp_transform in self.lrp_transforms],
+            'cc_mean_transforms': [[get_remain(layer[1], thr, min_channel) for layer in filter(lambda x: isinstance(x, nn.Sequential) and isinstance(x[1], CompactorLayer), cc_mean_transform[:-1])] for cc_mean_transform in self.cc_mean_transforms],
+            'cc_scale_transforms': [[get_remain(layer[1], thr, min_channel) for layer in filter(lambda x: isinstance(x, nn.Sequential) and isinstance(x[1], CompactorLayer), cc_scale_transform[:-1])] for cc_scale_transform in self.cc_scale_transforms],
+            'lrp_transforms': [[get_remain(layer[1], thr, min_channel) for layer in filter(lambda x: isinstance(x, nn.Sequential) and isinstance(x[1], CompactorLayer), lrp_transform[:-1])] for lrp_transform in self.lrp_transforms],
         }
         # 计算latent representation的输出通道
         # 这步是为了计算的时候让相同组compactor最后计算出来的通道数一样，保证deps的正确性，如果pruning部分改了实现方法，这里也需要修改
@@ -929,16 +929,16 @@ class CCResRepWithoutY(CC):
             for compactor in self.compactors[key[0]]:
                 compactor.set_mask_to_zero(key[1]) # mask the channel
 
-    def cal_deps(self, thr=1e-5):
+    def cal_deps(self, thr=1e-5, min_channel=1):
         deps = {
             'y': self.M,
-            'h_a': [get_remain(layer[1], thr) for layer in filter(lambda x: isinstance(x, nn.Sequential) and isinstance(x[1], CompactorLayer), self.h_a)],
-            'h_mean_s': [get_remain(layer[1], thr) for layer in filter(lambda x: isinstance(x, nn.Sequential) and isinstance(x[1], CompactorLayer), self.h_mean_s)],
-            'h_scale_s': [get_remain(layer[1], thr) for layer in filter(lambda x: isinstance(x, nn.Sequential) and isinstance(x[1], CompactorLayer), self.h_scale_s)],
+            'h_a': [get_remain(layer[1], thr, min_channel) for layer in filter(lambda x: isinstance(x, nn.Sequential) and isinstance(x[1], CompactorLayer), self.h_a)],
+            'h_mean_s': [get_remain(layer[1], thr, min_channel) for layer in filter(lambda x: isinstance(x, nn.Sequential) and isinstance(x[1], CompactorLayer), self.h_mean_s)],
+            'h_scale_s': [get_remain(layer[1], thr, min_channel) for layer in filter(lambda x: isinstance(x, nn.Sequential) and isinstance(x[1], CompactorLayer), self.h_scale_s)],
             # 这里没有算每个transforms的最后一层，统一放在后面计算
-            'cc_mean_transforms': [[get_remain(layer[1], thr) for layer in filter(lambda x: isinstance(x, nn.Sequential) and isinstance(x[1], CompactorLayer), cc_mean_transform[:-1])] for cc_mean_transform in self.cc_mean_transforms],
-            'cc_scale_transforms': [[get_remain(layer[1], thr) for layer in filter(lambda x: isinstance(x, nn.Sequential) and isinstance(x[1], CompactorLayer), cc_scale_transform[:-1])] for cc_scale_transform in self.cc_scale_transforms],
-            'lrp_transforms': [[get_remain(layer[1], thr) for layer in filter(lambda x: isinstance(x, nn.Sequential) and isinstance(x[1], CompactorLayer), lrp_transform[:-1])] for lrp_transform in self.lrp_transforms],
+            'cc_mean_transforms': [[get_remain(layer[1], thr, min_channel) for layer in filter(lambda x: isinstance(x, nn.Sequential) and isinstance(x[1], CompactorLayer), cc_mean_transform[:-1])] for cc_mean_transform in self.cc_mean_transforms],
+            'cc_scale_transforms': [[get_remain(layer[1], thr, min_channel) for layer in filter(lambda x: isinstance(x, nn.Sequential) and isinstance(x[1], CompactorLayer), cc_scale_transform[:-1])] for cc_scale_transform in self.cc_scale_transforms],
+            'lrp_transforms': [[get_remain(layer[1], thr, min_channel) for layer in filter(lambda x: isinstance(x, nn.Sequential) and isinstance(x[1], CompactorLayer), lrp_transform[:-1])] for lrp_transform in self.lrp_transforms],
         }
         # 计算latent representation的输出通道
         # 这步是为了计算的时候让相同组compactor最后计算出来的通道数一样，保证deps的正确性，如果pruning部分改了实现方法，这里也需要修改

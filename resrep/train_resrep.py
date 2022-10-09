@@ -404,7 +404,7 @@ def main(argv):
 
     model = models[args.model](RRBuilder(), num_slices=args.num_slices)
     model = model.to(device)
-    ori_deps = model.cal_deps()
+    ori_deps = model.cal_deps(min_channel=args.least_remain_channel)
     print(ori_deps)
 
     # freeze main path
@@ -522,7 +522,7 @@ def main(argv):
                         "optimizer": optimizer.state_dict(),
                         "aux_optimizer": aux_optimizer.state_dict(),
                         "lr_scheduler": lr_scheduler.state_dict(),
-                        "deps": model.cal_deps()
+                        "deps": model.cal_deps(min_channel=args.least_remain_channel)
                     },
                     save_name
                 )
