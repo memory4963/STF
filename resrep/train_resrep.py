@@ -459,8 +459,9 @@ def main(argv):
         pre_step = -1
 
         # debug
-        pruned_save_name = args.save_path[:-8] + '_pruned_' + str(epoch) + args.save_path[-8:]
-        save_checkpoint(rr_utils.cc_model_prune(model, ori_deps, args.threshold, enhanced_resrep='enhance' in args.model, without_y='without_y' in args.model, min_channel=args.least_remain_channel), pruned_save_name)
+        # pruned_save_name = args.save_path[:-8] + '_pruned_' + str(epoch) + args.save_path[-8:]
+        # save_checkpoint(rr_utils.cc_model_prune(model, ori_deps, args.threshold, enhanced_resrep='enhance' in args.model, without_y='without_y' in args.model, min_channel=args.least_remain_channel), pruned_save_name)
+        # exit()
 
         for i, d in enumerate(train_dataloader):
             resrep_step = step - args.resrep_warmup_step

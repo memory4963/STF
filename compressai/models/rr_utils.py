@@ -67,12 +67,12 @@ def cal_cc_flops(deps):
     return flops
 
 
-def cc_model_prune(model, ori_deps, thresh, enhanced_resrep, without_y=False, least_num=1):
+def cc_model_prune(model, ori_deps, thresh, enhanced_resrep, without_y=False, min_channel=1):
     table = model.suc_table
     num_slices = model.num_slices
     already_pruned_suc = set()
 
-    pruned_deps = model.cal_deps(thr=thresh, min_channel=least_num)
+    pruned_deps = model.cal_deps(thr=thresh, min_channel=min_channel)
     pruned_flops = cal_cc_flops(pruned_deps)
     ori_flops = cal_cc_flops(ori_deps)
     print('pruned deps: ')
@@ -99,7 +99,7 @@ def cc_model_prune(model, ori_deps, thresh, enhanced_resrep, without_y=False, le
                 if v['weight'] not in k1:
                     continue
                 weight = save_dict[k1]
-                pruned_weight, pruned_bias, survived_ids = fold_conv(weight, None, thresh, compactor, not v['conv'], least_num)
+                pruned_weight, pruned_bias, survived_ids = fold_conv(weight, None, thresh, compactor, not v['conv'], min_channel)
                 save_dict[k1] = pruned_weight
             save_dict[v['bias']] = save_dict[v['bias']][survived_ids.long()]
         else:
@@ -111,7 +111,7 @@ def cc_model_prune(model, ori_deps, thresh, enhanced_resrep, without_y=False, le
                 bias_name = v['bias']
             weight = save_dict[weight_name]
             bias = save_dict[bias_name]
-            pruned_weight, pruned_bias, survived_ids = fold_conv(weight, bias, thresh, compactor, not v['conv'], least_num)
+            pruned_weight, pruned_bias, survived_ids = fold_conv(weight, bias, thresh, compactor, not v['conv'], min_channel)
             save_dict[weight_name] = pruned_weight
             save_dict[bias_name] = pruned_bias
 
