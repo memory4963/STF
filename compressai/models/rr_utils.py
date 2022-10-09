@@ -173,7 +173,7 @@ def fold_conv(fused_k, fused_b, thresh, compactor_mat, deconv=False, min_channel
 
     if len(filter_ids_higher_thresh) < min_channel:
         sortd_ids = torch.argsort(metric_vec)
-        filter_ids_higher_thresh = sortd_ids[-1:]
+        filter_ids_higher_thresh = sortd_ids[-min_channel:]
 
     if len(filter_ids_higher_thresh) < len(metric_vec):
         compactor_mat = compactor_mat.index_select(0, filter_ids_higher_thresh)
