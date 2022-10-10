@@ -197,6 +197,7 @@ def eval_model(model, filepaths, entropy_estimation=False, half=False, recon_pat
             rv = inference_entropy_estimation(model, x)
         for k, v in rv.items():
             metrics[k] += v
+    print(model.during_time/len(filepaths))
     for k, v in metrics.items():
         metrics[k] = v / len(filepaths)
 

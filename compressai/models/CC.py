@@ -1,4 +1,5 @@
 import math
+from time import time
 from typing import Iterable
 import torch
 import torch.nn as nn
@@ -53,9 +54,9 @@ class CC(CompressionModel):
         )
 
         self.h_a = nn.Sequential(
-            conv3x3(320, 320),
+            conv3x3(M, M),
             nn.ReLU(),
-            conv(320, 256, stride=2),
+            conv(M, 256, stride=2),
             nn.ReLU(),
             conv(256, 192, stride=2),
         )
@@ -65,7 +66,7 @@ class CC(CompressionModel):
             nn.ReLU(),
             deconv(192, 256, stride=2),
             nn.ReLU(),
-            conv3x3(256, 320),
+            conv3x3(256, M),
         )
 
         self.h_scale_s = nn.Sequential(
@@ -73,38 +74,39 @@ class CC(CompressionModel):
             nn.ReLU(),
             deconv(192, 256, stride=2),
             nn.ReLU(),
-            conv3x3(256, 320),
+            conv3x3(256, M),
         )
         self.cc_mean_transforms = nn.ModuleList(
             nn.Sequential(
-                conv3x3(320 + 320//self.num_slices*i, 224 + 320//self.num_slices*i*2//3),
+                conv3x3(M + M//self.num_slices*i, 224 + M//self.num_slices*i*2//3),
                 nn.ReLU(),
-                conv3x3(224 + 320//self.num_slices*i*2//3, 128 + 320//self.num_slices*i*1//3),
+                conv3x3(224 + M//self.num_slices*i*2//3, 128 + M//self.num_slices*i*1//3),
                 nn.ReLU(),
-                conv3x3(128 + 320//self.num_slices*i*1//3, 320//self.num_slices),
+                conv3x3(128 + M//self.num_slices*i*1//3, M//self.num_slices),
             ) for i in range(self.num_slices)
         )
         self.cc_scale_transforms = nn.ModuleList(
             nn.Sequential(
-                conv3x3(320 + 320//self.num_slices*i, 224 + 320//self.num_slices*i*2//3),
+                conv3x3(M + M//self.num_slices*i, 224 + M//self.num_slices*i*2//3),
                 nn.ReLU(),
-                conv3x3(224 + 320//self.num_slices*i*2//3, 128 + 320//self.num_slices*i*1//3),
+                conv3x3(224 + M//self.num_slices*i*2//3, 128 + M//self.num_slices*i*1//3),
                 nn.ReLU(),
-                conv3x3(128 + 320//self.num_slices*i*1//3, 320//self.num_slices),
+                conv3x3(128 + M//self.num_slices*i*1//3, M//self.num_slices),
             ) for i in range(self.num_slices)
             )
         self.lrp_transforms = nn.ModuleList(
             nn.Sequential(
-                conv3x3(320 + 320//self.num_slices*(i+1), 224 + 320//self.num_slices*i*2//3),
+                conv3x3(M + M//self.num_slices*(i+1), 224 + M//self.num_slices*i*2//3),
                 nn.ReLU(),
-                conv3x3(224 + 320//self.num_slices*i*2//3, 128 + 320//self.num_slices*i*1//3),
+                conv3x3(224 + M//self.num_slices*i*2//3, 128 + M//self.num_slices*i*1//3),
                 nn.ReLU(),
-                conv3x3(128 + 320//self.num_slices*i*1//3, 320//self.num_slices),
+                conv3x3(128 + M//self.num_slices*i*1//3, M//self.num_slices),
             ) for i in range(self.num_slices)
         )
 
         self.entropy_bottleneck = EntropyBottleneck(N)
         self.gaussian_conditional = GaussianConditional(None)
+        self.during_time = 0.
 
 
     def update(self, scale_table=None, force=False):
@@ -240,8 +242,12 @@ class CC(CompressionModel):
             y_scales.append(scale)
             y_means.append(mu)
 
+        torch.cuda.synchronize()
+        start = time()
         encoder.encode_with_indexes(symbols_list, indexes_list, cdf, cdf_lengths, offsets)
         y_string = encoder.flush()
+        torch.cuda.synchronize()
+        self.during_time += time()-start
         y_strings.append(y_string)
 
         return {"strings": [y_strings, z_strings], "shape": z.size()[-2:]}
