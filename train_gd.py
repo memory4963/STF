@@ -507,21 +507,18 @@ def main(argv):
 def prune_model(model, save_path):
     save_dict = model.state_dict()
     deps = []
-    for i, (mask_name, prune_helper) in enumerate(model.mask_weight_pairs.items()):
+    for mask_name, prune_helper in model.mask_weight_pairs.items():
         type = prune_helper.type
         weight = save_dict[prune_helper.weight]
         bias = save_dict[prune_helper.bias]
         if prune_helper.suc_weight is not None:
             suc_weight = save_dict[prune_helper.suc_weight]
-        if prune_helper.beta is not None:
-            beta = save_dict[prune_helper.beta]
-            gamma = save_dict[prune_helper.gamma]
         gate = save_dict[prune_helper.gate]
 
         mask_idx = torch.where(save_dict[mask_name] > 0.)[1]
         deps.append(mask_idx.shape[0])
 
-        if prune_helper.conv:
+        if prune_helper.is_conv:
             weight = torch.einsum('jikv,ajbc->jikv', weight, gate)
             weight = weight[mask_idx]
         else:
@@ -529,19 +526,14 @@ def prune_model(model, save_path):
             weight = weight[:, mask_idx]
 
         # 同一组只需要对相同的suc_weight处理一次，但hyper里暂时没有这种情况
-        if prune_helper.suc_conv is not None:
-            if prune_helper.suc_conv:
+        if prune_helper.suc_weight is not None:
+            if prune_helper.suc_is_conv:
                 suc_weight = suc_weight[:, mask_idx]
             else:
                 suc_weight = suc_weight[mask_idx]
 
         bias = bias*gate.view(-1)
         bias = bias[mask_idx]
-
-        if prune_helper.beta is not None:
-            beta = beta[mask_idx]
-            gamma = gamma[mask_idx]
-            gamma = gamma[:, mask_idx]
 
         if type == 'bottleneck':
             for k, v in save_dict.items():
@@ -550,9 +542,6 @@ def prune_model(model, save_path):
 
         save_dict[prune_helper.weight] = weight
         save_dict[prune_helper.bias] = bias
-        if prune_helper.beta is not None:
-            save_dict[prune_helper.beta] = beta
-            save_dict[prune_helper.gamma] = gamma
         if prune_helper.suc_weight is not None:
             save_dict[prune_helper.suc_weight] = suc_weight
     for k, v in model.KEY_TABLE.items():
