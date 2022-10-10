@@ -152,11 +152,11 @@ def load_checkpoint(arch: str, checkpoint_path: str) -> nn.Module:
     return models[arch].from_state_dict(state_dict).eval()
 
 
-def eval_model(model, filepaths, entropy_estimation=False, half=False, recon_path='reconstruction'):
+def eval_model(model, filepaths, interval=40, num_slices=5, entropy_estimation=False, half=False, recon_path='reconstruction'):
     device = next(model.parameters()).device
     metrics = {}
     # 生成slice分割
-    gene_slices([], model=model, filepaths=filepaths, device=device, entropy_estimation=entropy_estimation, half=half, recon_path=recon_path, metrics=metrics)
+    gene_slices([], interval=interval, num_slices=num_slices, model=model, filepaths=filepaths, device=device, entropy_estimation=entropy_estimation, half=half, recon_path=recon_path, metrics=metrics)
     return metrics
 
 
@@ -242,6 +242,8 @@ def setup_args():
             required=True,
             help="checkpoint path",
         )
+    parent_parser.add_argument("--interval", type=int, default=40, help="interval of splits of slices")
+    parent_parser.add_argument("--num_slices", type=int, default=5, help="num of slices")
     return parent_parser
 
 
@@ -272,10 +274,11 @@ def main(argv):
 
         model.update(force=True)
 
-        metrics = eval_model(model, filepaths, args.entropy_estimation, args.half, args.recon_path)
+        metrics = eval_model(model, filepaths, args.interval, args.num_slices, args.entropy_estimation, args.half, args.recon_path)
         min_slice = {'bpp': 1000000.}
         min_key = ''
         for k, v in metrics.items():
+            print(k, v)
             results[k].append(v)
             if v['bpp'] < min_slice['bpp']:
                 min_slice = v
