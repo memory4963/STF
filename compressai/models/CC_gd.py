@@ -10,6 +10,7 @@ from .utils import conv, deconv, update_registered_buffers
 from compressai.ops import ste_round
 from compressai.layers import conv3x3, subpel_conv3x3, Win_noShift_Attention
 from .base import CompressionModel
+from .CC import CC
 
 
 # From Balle's tensorflow compression examples
@@ -754,3 +755,66 @@ class GateDecorator(nn.Module):
 
     def forward(self, x):
         return x * self.gate * self.mask
+
+
+class CC_ft(CC):
+    def __init__(self, deps, N=192, M=320, **kwargs):
+        super().__init__(N, M, **kwargs)
+
+        self.h_a = nn.Sequential(
+            conv3x3(320, deps[0]),
+            nn.ReLU(),
+            conv(deps[0], deps[1], stride=2),
+            nn.ReLU(),
+            conv(deps[1], deps[2], stride=2),
+        )
+
+        self.h_mean_s = nn.Sequential(
+            deconv(deps[2], deps[3], stride=2),
+            nn.ReLU(),
+            deconv(deps[3], deps[4], stride=2),
+            nn.ReLU(),
+            conv3x3(deps[4], deps[5]),
+        )
+
+        self.h_scale_s = nn.Sequential(
+            deconv(deps[2], deps[6], stride=2),
+            nn.ReLU(),
+            deconv(deps[6], deps[7], stride=2),
+            nn.ReLU(),
+            conv3x3(deps[7], deps[8]),
+        )
+
+        self.i = 9
+        self.cc_mean_transforms = nn.ModuleList(
+            nn.Sequential(
+                conv3x3(deps[5] + 32*min(i, 5), deps[self.i]),
+                nn.ReLU(),
+                conv3x3(deps[self.auto_incre_i()], deps[self.i]),
+                nn.ReLU(),
+                conv3x3(deps[self.auto_incre_i()], 32),
+            ) for i in range(10)
+        )
+        
+        self.cc_scale_transforms = nn.ModuleList(
+            nn.Sequential(
+                conv3x3(deps[8] + 32*min(i, 5), deps[self.i]),
+                nn.ReLU(),
+                conv3x3(deps[self.auto_incre_i()], deps[self.i]),
+                nn.ReLU(),
+                conv3x3(deps[self.auto_incre_i()], 32),
+            ) for i in range(10)
+            )
+        self.lrp_transforms = nn.ModuleList(
+            nn.Sequential(
+                conv3x3(deps[5] + 32*min(i+1, 6), deps[self.i]),
+                nn.ReLU(),
+                conv3x3(deps[self.auto_incre_i()], deps[self.i]),
+                nn.ReLU(),
+                conv3x3(deps[self.auto_incre_i()], 32),
+            ) for i in range(10)
+        )
+
+    def auto_incre_i(self):
+        self.i += 1
+        return self.i-1
