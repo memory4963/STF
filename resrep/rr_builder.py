@@ -21,7 +21,6 @@ class RRBuilder:
                                 padding_mode=padding_mode)
         se.add_module('conv', conv_layer)
         se.add_module('compactor', CompactorLayer(num_features=out_channels))
-        print('use compactor on conv with kernel size {}'.format(kernel_size))
         return se
 
     def Conv2dGroupRR(self, in_channels, out_channels, kernel_size=3, stride=1, padding=0, dilation=1, groups=1,
@@ -39,7 +38,6 @@ class RRBuilder:
                                 padding_mode=padding_mode)
         se.add_module('conv', conv_layer)
         se.add_module('compactor', CompactorLayer(num_features=out_channels, group_id=group_id))
-        print('use compactor on conv with kernel size {}'.format(kernel_size))
         return se
     
     def SingleCompactor(self, channels):
@@ -60,7 +58,6 @@ class RRBuilder:
                                 output_padding=output_padding, padding_mode=padding_mode)
         se.add_module('conv', conv_layer)
         se.add_module('compactor', CompactorLayer(num_features=out_channels))
-        print('use compactor on deconv with kernel size {}'.format(kernel_size))
         return se
 
 # x=0
