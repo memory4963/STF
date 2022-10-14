@@ -12,7 +12,8 @@ def get_remain(vec: CompactorLayer, thr, min_channel=1):
 def get_group_remain(compactors, thr):
     remaining = np.zeros(compactors[0].num_features)
     for compactor in compactors:
-        remaining = np.logical_or(remaining, compactor.get_metric_vector() >= thr)
+        if not compactor.excluded:
+            remaining = np.logical_or(remaining, compactor.get_metric_vector() >= thr)
     return np.sum(remaining)
 
 
@@ -25,10 +26,13 @@ def cal_conv_flops(in_ch, out_ch, h, w, ks):
 def cal_compactor_scores(compactors):
     scores = {}
     for i, group in enumerate(compactors):
-        metric_vector = group[0].get_metric_vector()
-        for compactor in group[1:]:
-            metric_vector += compactor.get_metric_vector()
-        metric_vector /= len(group)
+        metric_vector = np.zeros_like(group[0].get_metric_vector())
+        cnt = 0
+        for compactor in group:
+            if not compactor.excluded:
+                metric_vector += compactor.get_metric_vector()
+                cnt += 1
+        metric_vector /= cnt
         for j, v in enumerate(metric_vector):
             scores[(i, j)] = v
     return scores
@@ -89,8 +93,7 @@ def cc_model_prune(model, ori_deps, thresh, enhanced_resrep, without_y=False, mi
     for k, v in table.items():
         if k in model.group_compactor_names:
             # 保证同组的compactor最终的输出维度是一样的
-            # compator第一个一定要是当前的compactor
-            compactor = [save_dict[k+'.pwc.weight']] + list(map(lambda x: save_dict[x+'.pwc.weight'], model.group_compactor_names[k]))
+            compactor = (save_dict[k+'.pwc.weight'], list(map(lambda x: save_dict[x+'.pwc.weight'], model.group_compactor_names[k])))
         else:
             compactor = save_dict[k+'.pwc.weight']
 
@@ -161,9 +164,9 @@ def cc_model_prune(model, ori_deps, thresh, enhanced_resrep, without_y=False, mi
 
 def fold_conv(fused_k, fused_b, thresh, compactor_mat, deconv=False, min_channel=1):
     # 只要有一个compactor中的这个channel超过阈值就保留
-    if isinstance(compactor_mat, list):
-        metric_vec = torch.sqrt(torch.sum(compactor_mat[0] ** 2, axis=(1, 2, 3))) > thresh
-        for __compactor_mat in compactor_mat[1:]:
+    if isinstance(compactor_mat, tuple):
+        metric_vec = torch.zeros_like(torch.sqrt(torch.sum(compactor_mat[1][0] ** 2, axis=(1, 2, 3))) > thresh)
+        for __compactor_mat in compactor_mat[1]:
             metric_vec = torch.logical_or(metric_vec, torch.sqrt(torch.sum(__compactor_mat ** 2, axis=(1, 2, 3))) > thresh)
         filter_ids_higher_thresh = torch.where(metric_vec)[0]
         compactor_mat = compactor_mat[0]

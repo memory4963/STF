@@ -40,11 +40,11 @@ class RRBuilder:
         se.add_module('compactor', CompactorLayer(num_features=out_channels, group_id=group_id))
         return se
     
-    def SingleCompactor(self, channels):
-        return nn.Sequential(CompactorLayer(channels))
+    def SingleCompactor(self, channels, excluded):
+        return nn.Sequential(CompactorLayer(channels, excluded))
 
-    def SingleEnhancedCompactor(self, in_channels, out_channels, start_channel):
-        return nn.Sequential(EnhancedCompactorLayer(in_channels, out_channels, start_channel))
+    def SingleEnhancedCompactor(self, in_channels, out_channels, start_channel, excluded):
+        return nn.Sequential(EnhancedCompactorLayer(in_channels, out_channels, start_channel, excluded))
 
     def ConvTranspose2dRR(self, in_channels, out_channels, kernel_size=3, stride=1, padding=0, dilation=1, groups=1,
                output_padding=0, padding_mode='zeros'):
@@ -62,7 +62,7 @@ class RRBuilder:
 
 # x=0
 class CompactorLayer(nn.Module):
-    def __init__(self, num_features):
+    def __init__(self, num_features, excluded=False):
         super(CompactorLayer, self).__init__()
         self.pwc = nn.Conv2d(in_channels=num_features, out_channels=num_features, kernel_size=1,
                           stride=1, padding=0, bias=False)
@@ -78,6 +78,7 @@ class CompactorLayer(nn.Module):
         self.register_buffer('mask', torch.ones(num_features))
         init.ones_(self.mask)
         self.num_features = num_features
+        self.excluded = excluded
 
     def forward(self, inputs):
         return self.pwc(inputs)
@@ -120,8 +121,8 @@ class CompactorLayer(nn.Module):
         return metric_vector
 
 class EnhancedCompactorLayer(CompactorLayer):
-    def __init__(self, in_channels, out_channels, start_channel):
-        super().__init__(out_channels)
+    def __init__(self, in_channels, out_channels, start_channel, excluded=False):
+        super().__init__(out_channels, excluded)
 
         self.pwc = nn.Conv2d(in_channels, out_channels, kernel_size=1,
                           stride=1, padding=0, bias=False)

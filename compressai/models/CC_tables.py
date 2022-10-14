@@ -74,13 +74,18 @@ def gene_table(num_slices=10, without_y=False):
     return cc_table
 
 
-def gene_same_group_compactor_name(num_slices=10):
+def gene_same_group_compactor_name(num_slices=10, y_excluded=False):
     compactor_names = {}
     for i in range(num_slices):
         compactor_names['y_compactors.{}.0'.format(i)] = ['lrp_transforms.{}.4.compactor'.format(i), 'cc_scale_transforms.{}.4.compactor'.format(i), 'cc_mean_transforms.{}.4.compactor'.format(i)]
-        compactor_names['lrp_transforms.{}.4.compactor'.format(i)] = ['y_compactors.{}.0'.format(i), 'cc_scale_transforms.{}.4.compactor'.format(i), 'cc_mean_transforms.{}.4.compactor'.format(i)]
-        compactor_names['cc_scale_transforms.{}.4.compactor'.format(i)] = ['y_compactors.{}.0'.format(i), 'lrp_transforms.{}.4.compactor'.format(i), 'cc_mean_transforms.{}.4.compactor'.format(i)]
-        compactor_names['cc_mean_transforms.{}.4.compactor'.format(i)] = ['y_compactors.{}.0'.format(i), 'lrp_transforms.{}.4.compactor'.format(i), 'cc_scale_transforms.{}.4.compactor'.format(i)]
+        compactor_names['lrp_transforms.{}.4.compactor'.format(i)] = ['lrp_transforms.{}.4.compactor'.format(i), 'cc_scale_transforms.{}.4.compactor'.format(i), 'cc_mean_transforms.{}.4.compactor'.format(i)]
+        compactor_names['cc_scale_transforms.{}.4.compactor'.format(i)] = ['lrp_transforms.{}.4.compactor'.format(i), 'cc_scale_transforms.{}.4.compactor'.format(i), 'cc_mean_transforms.{}.4.compactor'.format(i)]
+        compactor_names['cc_mean_transforms.{}.4.compactor'.format(i)] = ['lrp_transforms.{}.4.compactor'.format(i), 'cc_scale_transforms.{}.4.compactor'.format(i), 'cc_mean_transforms.{}.4.compactor'.format(i)]
+        if not y_excluded:
+            compactor_names['y_compactors.{}.0'.format(i)].append('y_compactors.{}.0'.format(i))
+            compactor_names['lrp_transforms.{}.4.compactor'.format(i)].append('y_compactors.{}.0'.format(i))
+            compactor_names['cc_scale_transforms.{}.4.compactor'.format(i)].append('y_compactors.{}.0'.format(i))
+            compactor_names['cc_mean_transforms.{}.4.compactor'.format(i)].append('y_compactors.{}.0'.format(i))
     return compactor_names
 
 

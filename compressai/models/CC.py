@@ -534,7 +534,7 @@ class CC_RandomSplit(CC):
 
 
 class CCResRep(CC):
-    def __init__(self, builder: RRBuilder, N=192, M=320, num_slices=10, max_support_slices=-1, **kwargs):
+    def __init__(self, builder: RRBuilder, N=192, M=320, num_slices=10, max_support_slices=-1, y_excluded=False, **kwargs):
         super().__init__(N, M, num_slices, max_support_slices, **kwargs)
         self.slice_size = M//num_slices
         self.N = N
@@ -561,7 +561,7 @@ class CCResRep(CC):
         )
 
         # y的通道剪枝，为了和后面的lrp输出对应，因此分割成num_slices个compactor
-        self.y_compactors = self.gene_y_compactors(builder)
+        self.y_compactors = self.gene_y_compactors(builder, excluded=y_excluded)
 
         self.h_a = nn.Sequential(
             builder.Conv2dRR(M, M, stride=1, padding=1),
@@ -629,10 +629,10 @@ class CCResRep(CC):
             [(self.lrp_transforms[i][2][1],) for i in range(self.num_slices)]
         
         self.suc_table = CC_tables.gene_table(self.num_slices)
-        self.group_compactor_names = CC_tables.gene_same_group_compactor_name(self.num_slices)
+        self.group_compactor_names = CC_tables.gene_same_group_compactor_name(self.num_slices, y_excluded)
     
-    def gene_y_compactors(self, builder: RRBuilder):
-        return nn.ModuleList(builder.SingleCompactor(self.slice_size) for _ in range(self.num_slices))
+    def gene_y_compactors(self, builder: RRBuilder, excluded):
+        return nn.ModuleList(builder.SingleCompactor(self.slice_size, excluded) for _ in range(self.num_slices))
 
     def forward(self, x):
         y = self.g_a(x)
@@ -991,8 +991,8 @@ class CCEnhancedResRep(CCResRep):
     def __init__(self, builder: RRBuilder, N=192, M=320, num_slices=10, max_support_slices=-1, **kwargs):
         super().__init__(builder, N, M, num_slices, max_support_slices, **kwargs)
 
-    def gene_y_compactors(self, builder: RRBuilder):
-        return nn.ModuleList(builder.SingleEnhancedCompactor(self.M, self.slice_size, i*self.slice_size) for i in range(self.num_slices)) 
+    def gene_y_compactors(self, builder: RRBuilder, excluded):
+        return nn.ModuleList(builder.SingleEnhancedCompactor(self.M, self.slice_size, i*self.slice_size, excluded) for i in range(self.num_slices)) 
 
     def compact_y(self, ori_y):
         y = torch.zeros_like(ori_y)

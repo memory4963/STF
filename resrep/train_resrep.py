@@ -126,53 +126,6 @@ def configure_optimizers(model, args):
     return optimizer, aux_optimizer
 
 
-def train_one_epoch(
-    model, criterion, train_dataloader, optimizer, aux_optimizer, epoch, args
-):
-    clip_max_norm = args.clip_max_norm
-    model.train()
-    device = next(model.parameters()).device
-    start_time = time()
-    pre_step = -1
-
-    for i, d in enumerate(train_dataloader):
-        d = d.to(device)
-
-        optimizer.zero_grad()
-        aux_optimizer.zero_grad()
-
-        out_net = model(d)
-
-        out_criterion = criterion(out_net, d)
-        out_criterion["loss"].backward()
-        if clip_max_norm > 0:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), clip_max_norm)
-        optimizer.step()
-
-        if args.distributed:
-            aux_loss = model.module.aux_loss()
-        else:
-            aux_loss = model.aux_loss()
-        aux_loss.backward()
-        aux_optimizer.step()
-
-        if i % 10 == 0 and utils.is_main_process():
-            now_time = time()
-            left_time = int((now_time-start_time)/(i-pre_step)*(len(train_dataloader)-i))
-            start_time = now_time
-            pre_step = i
-            print(
-                f'Train epoch {epoch}: ['
-                f'{i*len(d)}/{len(train_dataloader.dataset)}'
-                f' ({100. * i / len(train_dataloader):.0f}%)]'
-                f'\tLoss: {out_criterion["loss"].item():.3f} |'
-                f'\tMSE loss: {out_criterion["mse_loss"].item() * 255 ** 2 / 3:.3f} |'
-                f'\tBpp loss: {out_criterion["bpp_loss"].item():.2f} |'
-                f'\tAux loss: {aux_loss.item():.2f}'
-                f'\tETA: {left_time//3600}:{(left_time%3600)//60}:{left_time%60}'
-            )
-
-
 def train_one_step(model, d, criterion, optimizer, aux_optimizer, lasso_strength, distributed, clip_max_norm):
     optimizer.zero_grad()
     aux_optimizer.zero_grad()
@@ -328,6 +281,7 @@ def parse_args(argv):
     parser.add_argument("--threshold", type=float, default=1e-5, help="penalty of lasso")
     parser.add_argument("--slow_start", type=int, default=100, help="slow start for pruning to avoid performance crash")
     parser.add_argument("--freeze_main", action="store_true", help="whether freeze main")
+    parser.add_argument("--y_excluded", action="store_true", help="whether exclude y when calculate compactor score")
 
     parser.add_argument('--world_size', default=1, type=int, help='number of distributed processes')
     parser.add_argument("--local_rank", default=0, type=int)
@@ -402,7 +356,7 @@ def main(argv):
         )
     
 
-    model = models[args.model](RRBuilder(), num_slices=args.num_slices)
+    model = models[args.model](RRBuilder(), num_slices=args.num_slices, y_excluded=args.y_excluded)
     model = model.to(device)
     ori_deps = model.cal_deps(min_channel=args.least_remain_channel)
     print(ori_deps)
