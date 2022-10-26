@@ -37,6 +37,7 @@ import compressai
 
 from compressai.zoo import load_state_dict, models
 from compressai.models.rr_utils import cal_cc_flops
+from train import RateDistortionLoss
 
 torch.backends.cudnn.deterministic = True
 torch.set_num_threads(1)
@@ -128,12 +129,16 @@ def inference(model, x, filename, recon_path):
 
 
 @torch.no_grad()
-def inference_entropy_estimation(model, x):
+def inference_entropy_estimation(model, x, criterion=None):
     x = x.unsqueeze(0)
 
     start = time.time()
     out_net = model.forward(x)
     elapsed_time = time.time() - start
+
+    out_criterion = None
+    if criterion is not None:
+        out_criterion = criterion(out_net, x)
 
     num_pixels = x.size(0) * x.size(2) * x.size(3)
     bpp = sum(
@@ -147,6 +152,7 @@ def inference_entropy_estimation(model, x):
         "bpp": bpp.item(),
         "encoding_time": elapsed_time / 2.0,  # broad estimation
         "decoding_time": elapsed_time / 2.0,
+        "eval_loss": out_criterion['loss'].item() if out_criterion else -1
     }
 
 
@@ -194,6 +200,8 @@ def eval_model(model, filepaths, entropy_estimation=False, half=False, recon_pat
                 x = x.half()
             rv = inference(model, x, _filename, recon_path)
         else:
+            # criterion = RateDistortionLoss(0.0483)
+            # rv = inference_entropy_estimation(model, x, criterion)
             rv = inference_entropy_estimation(model, x)
         for k, v in rv.items():
             metrics[k] += v

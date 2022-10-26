@@ -377,7 +377,7 @@ def main(argv):
     optimizer, aux_optimizer = configure_optimizers(model, args)
     # Settings of ResRep
     lr_scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs*len(train_dataloader))
-    criterion = RateDistortionLoss()
+    criterion = RateDistortionLoss(args.lmbda)
 
     last_epoch = 0
     if args.pretrained and os.path.exists(args.pretrained):
