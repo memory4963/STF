@@ -286,7 +286,11 @@ def parse_args(argv):
     parser.add_argument('--world_size', default=1, type=int, help='number of distributed processes')
     parser.add_argument("--local_rank", default=0, type=int)
     parser.add_argument('--dist_url', default='env://', help='url used to set up distributed training')
-    parser.add_argument('--distributed', action='store_false')
+    parser.add_argument('--distributed', action='store_true')
+
+    # debug
+    parser.add_argument('--rd_cost', action='store_true')
+
     args = parser.parse_args(argv)
     return args
 
@@ -403,6 +407,10 @@ def main(argv):
     args.num_per_mask = num_per_mask // 2
     mask_interval = args.mask_interval 
     args.mask_interval = mask_interval * 2
+    if args.rd_cost:
+        loss = test_epoch(0, test_dataloader, net_without_ddp, criterion)
+        print(loss)
+        exit()
     for epoch in range(last_epoch, args.epochs):
         if utils.is_main_process():
             print(f"Learning rate: {optimizer.param_groups[0]['lr']}")
