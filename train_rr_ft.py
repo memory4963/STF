@@ -291,6 +291,10 @@ def parse_args(argv):
     parser.add_argument( "--local_rank", default=0, type=int)
     parser.add_argument('--dist_url', default='env://', help='url used to set up distributed training')
     parser.add_argument('--distributed', action='store_false')
+
+    # debug
+    parser.add_argument('--rd_cost', action='store_true')
+
     args = parser.parse_args(argv)
     return args
 
@@ -398,6 +402,11 @@ def main(argv):
         lr_scheduler.load_state_dict(ckpt["lr_scheduler"])
 
     best_loss = float("inf")
+    if args.rd_cost:
+        criterion.lmbda = args.lmbda
+        loss = test_epoch(0, test_dataloader, net_without_ddp, criterion)
+        print(loss)
+        exit()
     for epoch in range(last_epoch, args.epochs):
         # CC中是这么做的 # by LUO
         if epoch < args.epochs // 2:
