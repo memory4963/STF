@@ -184,7 +184,9 @@ class CC(CompressionModel):
         """Return a new model instance from `state_dict`."""
         N = state_dict["g_a.0.weight"].size(0)
         M = state_dict["g_a.6.weight"].size(0)
-        net = cls(N, M)
+        slice_num = 0
+        while (f'cc_mean_transforms.{slice_num}.0.weight' in state_dict): slice_num+=1
+        net = cls(N, M, slice_num)
         net.load_state_dict(state_dict)
         return net
 
