@@ -282,6 +282,7 @@ def parse_args(argv):
     parser.add_argument("--slow_start", type=int, default=100, help="slow start for pruning to avoid performance crash")
     parser.add_argument("--freeze_main", action="store_true", help="whether freeze main")
     parser.add_argument("--y_excluded", action="store_true", help="whether exclude y when calculate compactor score")
+    parser.add_argument("--score_norm", action="store_true", help="calculate the normed score of channels, conflict with y_excluded")
 
     parser.add_argument('--world_size', default=1, type=int, help='number of distributed processes')
     parser.add_argument("--local_rank", default=0, type=int)
@@ -358,9 +359,11 @@ def main(argv):
             shuffle=False,
             pin_memory=(device == "cuda"),
         )
-    
 
-    model = models[args.model](RRBuilder(), num_slices=args.num_slices, y_excluded=args.y_excluded)
+    if args.score_norm and args.y_excluded:
+        raise "score_norm and y_excluded conflict with each other."
+
+    model = models[args.model](RRBuilder(), num_slices=args.num_slices, y_excluded=args.y_excluded, score_norm=args.score_norm)
     model = model.to(device)
     ori_deps = model.cal_deps(min_channel=args.least_remain_channel)
     print(ori_deps)

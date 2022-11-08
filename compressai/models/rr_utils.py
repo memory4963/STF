@@ -23,7 +23,7 @@ def cal_conv_flops(in_ch, out_ch, h, w, ks):
     return in_ch*out_ch*h*w*ks*ks*2
 
 
-def cal_compactor_scores(compactors):
+def cal_compactor_scores(compactors, norm_scores=None):
     scores = {}
     for i, group in enumerate(compactors):
         metric_vector = np.zeros_like(group[0].get_metric_vector())
@@ -32,7 +32,10 @@ def cal_compactor_scores(compactors):
             if not compactor.excluded:
                 metric_vector += compactor.get_metric_vector()
                 cnt += 1
-        metric_vector /= cnt
+        if norm_scores is None:
+            metric_vector /= cnt
+        else:
+            metric_vector /= np.log(norm_scores[i] / 1e7)
         for j, v in enumerate(metric_vector):
             scores[(i, j)] = v
     return scores

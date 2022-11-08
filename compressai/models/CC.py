@@ -536,7 +536,7 @@ class CC_RandomSplit(CC):
 
 
 class CCResRep(CC):
-    def __init__(self, builder: RRBuilder, N=192, M=320, num_slices=10, max_support_slices=-1, y_excluded=False, **kwargs):
+    def __init__(self, builder: RRBuilder, N=192, M=320, num_slices=10, max_support_slices=-1, y_excluded=False, score_norm=False, **kwargs):
         super().__init__(N, M, num_slices, max_support_slices, **kwargs)
         self.slice_size = M//num_slices
         self.N = N
@@ -632,6 +632,7 @@ class CCResRep(CC):
         
         self.suc_table = CC_tables.gene_table(self.num_slices)
         self.group_compactor_names = CC_tables.gene_same_group_compactor_name(self.num_slices, y_excluded)
+        self.score_norm = score_norm
     
     def gene_y_compactors(self, builder: RRBuilder, excluded):
         return nn.ModuleList(builder.SingleCompactor(self.slice_size, excluded) for _ in range(self.num_slices))
@@ -692,7 +693,7 @@ class CCResRep(CC):
 
     def resrep_masking(self, ori_deps, args):
         ori_flops = cal_cc_flops(ori_deps)
-        scores = cal_compactor_scores(self.compactors)
+        scores = cal_compactor_scores(self.compactors, self.gene_norm_scores() if self.score_norm else None)
         cur_deps = self.cal_mask_deps()
         sorted_keys = sorted(scores, key=scores.get)
         cur_flops = cal_cc_flops(cur_deps)
@@ -745,6 +746,70 @@ class CCResRep(CC):
             'cc_scale_transforms': [[layer[1].get_num_mask_ones() for layer in filter(lambda x: isinstance(x, nn.Sequential) and isinstance(x[1], CompactorLayer), cc_scale_transform)] for cc_scale_transform in self.cc_scale_transforms],
             'lrp_transforms': [[layer[1].get_num_mask_ones() for layer in filter(lambda x: isinstance(x, nn.Sequential) and isinstance(x[1], CompactorLayer), lrp_transform)] for lrp_transform in self.lrp_transforms],
         }
+
+    # Normalize scores of channels based on the change of FLOPs after pruning this channel.
+    # The order is binded with self.compactors
+    def gene_norm_scores(self):
+        deps = self.cal_mask_deps()
+        norm_scores = []
+        for i in range(self.num_slices): # latent representation
+            score = cal_conv_flops(self.N, 1, 16, 16, 5) # from g_a
+            score += cal_conv_flops(1, deps['h_a'][0], 16, 16, 3) # from h_a
+            score += cal_conv_flops(1, self.N, 32, 32, 5) # from g_s
+            for j in range(i+1, self.num_slices): # from transforms
+                score += cal_conv_flops(1, deps['cc_mean_transforms'][j][0], 16, 16, 3)
+                score += cal_conv_flops(1, deps['cc_scale_transforms'][j][0], 16, 16, 3)
+                score += cal_conv_flops(1, deps['lrp_transforms'][j][0], 16, 16, 3)
+            score += cal_conv_flops(1, deps['lrp_transforms'][i][0], 16, 16, 3)
+            norm_scores.append(score)
+        norm_scores.append(cal_conv_flops(deps['y'], 1, 16, 16, 3) + cal_conv_flops(1, deps['h_a'][1], 8, 8, 5)) # h_a
+        norm_scores.append(cal_conv_flops(deps['h_a'][0], 1, 8, 8, 5) + cal_conv_flops(1, deps['h_a'][2], 4, 4, 5)) # h_a
+        norm_scores.append(cal_conv_flops(deps['h_a'][1], 1, 8, 8, 5) + cal_conv_flops(1, deps['h_mean_s'][0], 8, 8, 5) + cal_conv_flops(1, deps['h_scale_s'][0], 8, 8, 5)) # h_a
+        norm_scores.append(cal_conv_flops(deps['h_a'][2], 1, 8, 8, 5) + cal_conv_flops(1, deps['h_mean_s'][1], 16, 16, 5)) # h_mean_s
+        norm_scores.append(cal_conv_flops(deps['h_mean_s'][0], 1, 16, 16, 5) + cal_conv_flops(1, deps['h_mean_s'][2], 16, 16, 3)) # h_mean_s
+        score = cal_conv_flops(deps['h_mean_s'][1], 1, 16, 16, 3) # h_mean_s
+        for i in range(self.num_slices):
+            score += cal_conv_flops(1, deps['cc_mean_transforms'][i][0], 16, 16, 3)
+            score += cal_conv_flops(1, deps['lrp_transforms'][i][0], 16, 16, 3)
+        norm_scores.append(score) # h_mean_s
+        norm_scores.append(cal_conv_flops(deps['h_a'][2], 1, 8, 8, 5) + cal_conv_flops(1, deps['h_scale_s'][1], 16, 16, 5)) # h_scale_s
+        norm_scores.append(cal_conv_flops(deps['h_scale_s'][0], 1, 16, 16, 5) + cal_conv_flops(1, deps['h_scale_s'][2], 16, 16, 3)) # h_scale_s
+        score = cal_conv_flops(deps['h_scale_s'][1], 1, 16, 16, 3) # h_scale_s
+        for i in range(self.num_slices):
+            score += cal_conv_flops(1, deps['cc_scale_transforms'][i][0], 16, 16, 3)
+        norm_scores.append(score) # h_scale_s
+        for i in range(self.num_slices): # cc_mean_transforms
+            norm_scores.append(
+                cal_conv_flops(deps['h_mean_s'][2]+sum(map(lambda x: x[-1], deps['cc_mean_transforms'][:i])), 1, 16, 16, 3) +
+                cal_conv_flops(1, deps['cc_mean_transforms'][i][1], 16, 16, 3)
+                )
+        for i in range(self.num_slices): # cc_mean_transforms
+            norm_scores.append(
+                cal_conv_flops(deps['cc_mean_transforms'][i][0], 1, 16, 16, 3) +
+                cal_conv_flops(1, deps['cc_mean_transforms'][i][2], 16, 16, 3)
+            )
+        for i in range(self.num_slices): # cc_scale_transforms
+            norm_scores.append(
+                cal_conv_flops(deps['h_scale_s'][2]+sum(map(lambda x: x[-1], deps['cc_scale_transforms'][:i])), 1, 16, 16, 3) +
+                cal_conv_flops(1, deps['cc_scale_transforms'][i][1], 16, 16, 3)
+                )
+        for i in range(self.num_slices): # cc_scale_transforms
+            norm_scores.append(
+                cal_conv_flops(deps['cc_scale_transforms'][i][0], 1, 16, 16, 3) +
+                cal_conv_flops(1, deps['cc_scale_transforms'][i][2], 16, 16, 3)
+            )
+        for i in range(self.num_slices): # lrp_transforms
+            norm_scores.append(
+                cal_conv_flops(deps['h_mean_s'][2] + deps['cc_mean_transforms'][i][-1] + sum(map(lambda x: x[-1], deps['lrp_transforms'][:i])), 1, 16, 16, 3) +
+                cal_conv_flops(1, deps['lrp_transforms'][i][1], 16, 16, 3)
+                )
+        for i in range(self.num_slices): # lrp_transforms
+            norm_scores.append(
+                cal_conv_flops(deps['lrp_transforms'][i][0], 1, 16, 16, 3) +
+                cal_conv_flops(1, deps['lrp_transforms'][i][2], 16, 16, 3)
+            )
+        return norm_scores
+
 
     def load_pretrained(self, state_dict):
         update_registered_buffers(
