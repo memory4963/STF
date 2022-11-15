@@ -6,8 +6,9 @@ from compressai.layers import GDN
 
 class RRBuilder:
 
-    def __init__(self):
+    def __init__(self, group_fisher=False):
         self.cur_group_id = -1
+        self.group_fisher = group_fisher
 
     def Conv2dRR(self, in_channels, out_channels, kernel_size=3, stride=1, padding=0, dilation=1, groups=1,
                padding_mode='zeros'):
@@ -20,7 +21,7 @@ class RRBuilder:
                                 stride=stride, padding=padding, dilation=dilation, groups=groups, bias=True,
                                 padding_mode=padding_mode)
         se.add_module('conv', conv_layer)
-        se.add_module('compactor', CompactorLayer(num_features=out_channels))
+        se.add_module('compactor', CompactorLayer(num_features=out_channels, group_fisher=self.group_fisher))
         return se
 
     def Conv2dGroupRR(self, in_channels, out_channels, kernel_size=3, stride=1, padding=0, dilation=1, groups=1,
@@ -37,14 +38,14 @@ class RRBuilder:
                                 stride=stride, padding=padding, dilation=dilation, groups=groups, bias=True,
                                 padding_mode=padding_mode)
         se.add_module('conv', conv_layer)
-        se.add_module('compactor', CompactorLayer(num_features=out_channels, group_id=group_id))
+        se.add_module('compactor', CompactorLayer(num_features=out_channels, group_fisher=self.group_fisher))
         return se
     
     def SingleCompactor(self, channels, excluded):
-        return nn.Sequential(CompactorLayer(channels, excluded))
+        return nn.Sequential(CompactorLayer(channels, excluded=excluded, group_fisher=self.group_fisher))
 
     def SingleEnhancedCompactor(self, in_channels, out_channels, start_channel, excluded):
-        return nn.Sequential(EnhancedCompactorLayer(in_channels, out_channels, start_channel, excluded))
+        return nn.Sequential(EnhancedCompactorLayer(in_channels, out_channels, start_channel, excluded=excluded, group_fisher=self.group_fisher))
 
     def ConvTranspose2dRR(self, in_channels, out_channels, kernel_size=3, stride=1, padding=0, dilation=1, groups=1,
                output_padding=0, padding_mode='zeros'):
@@ -57,12 +58,12 @@ class RRBuilder:
                                 stride=stride, padding=padding, dilation=dilation, groups=groups, bias=True,
                                 output_padding=output_padding, padding_mode=padding_mode)
         se.add_module('conv', conv_layer)
-        se.add_module('compactor', CompactorLayer(num_features=out_channels))
+        se.add_module('compactor', CompactorLayer(num_features=out_channels, group_fisher=self.group_fisher))
         return se
 
 # x=0
 class CompactorLayer(nn.Module):
-    def __init__(self, num_features, excluded=False):
+    def __init__(self, num_features, excluded=False, group_fisher=False):
         super(CompactorLayer, self).__init__()
         self.pwc = nn.Conv2d(in_channels=num_features, out_channels=num_features, kernel_size=1,
                           stride=1, padding=0, bias=False)
@@ -79,6 +80,12 @@ class CompactorLayer(nn.Module):
         init.ones_(self.mask)
         self.num_features = num_features
         self.excluded = excluded
+        self.group_fisher = group_fisher
+        if group_fisher:
+            self.init_fisher()
+            self.saved_output = 0
+            self.register_forward_hook(self.save_input_forward_hook)
+            self.register_backward_hook(self.compute_fisher_backward_hook)
 
     def forward(self, inputs):
         return self.pwc(inputs)
@@ -120,9 +127,25 @@ class CompactorLayer(nn.Module):
         metric_vector = torch.sqrt(torch.sum(self.get_pwc_kernel_detach() ** 2, dim=(1, 2, 3))).cpu().numpy()
         return metric_vector
 
+    def get_fisher(self):
+        return self.fisher.cpu().numpy()
+
+    def save_input_forward_hook(self, module, inputs, outputs):
+        if outputs.requires_grad:
+            self.saved_output = outputs
+
+    def compute_fisher_backward_hook(self, module, grad_input, grad_output):
+        self.fisher += (self.saved_output * grad_output[0]).sum([0, -1, -2])
+
+    def init_fisher(self):
+        if hasattr(self, 'fisher'):
+            self.fisher.zero_()
+        else:
+            self.register_buffer('fisher', torch.zeros(self.num_features))
+
 class EnhancedCompactorLayer(CompactorLayer):
-    def __init__(self, in_channels, out_channels, start_channel, excluded=False):
-        super().__init__(out_channels, excluded)
+    def __init__(self, in_channels, out_channels, start_channel, excluded=False, group_fisher=False):
+        super().__init__(out_channels, excluded, group_fisher)
 
         self.pwc = nn.Conv2d(in_channels, out_channels, kernel_size=1,
                           stride=1, padding=0, bias=False)

@@ -23,19 +23,28 @@ def cal_conv_flops(in_ch, out_ch, h, w, ks):
     return in_ch*out_ch*h*w*ks*ks*2
 
 
-def cal_compactor_scores(compactors, norm_scores=None):
+def cal_compactor_scores(compactors, norm_scores=None, group_fisher=False):
     scores = {}
     for i, group in enumerate(compactors):
-        metric_vector = np.zeros_like(group[0].get_metric_vector())
         cnt = 0
-        for compactor in group:
-            if not compactor.excluded:
-                metric_vector += compactor.get_metric_vector()
+        if group_fisher:
+            metric_vector = np.zeros_like(group[0].get_fisher())
+            for compactor in group:
+                if not compactor.excluded:
+                    metric_vector += compactor.get_fisher()
+                cnt += 1
+            # the group fisher uses the square of sum of gradients, so I put the square operation here
+            metric_vector **= 2
+        else:
+            metric_vector = np.zeros_like(group[0].get_metric_vector())
+            for compactor in group:
+                if not compactor.excluded:
+                    metric_vector += compactor.get_metric_vector()
                 cnt += 1
         if norm_scores is None:
             metric_vector /= cnt
         else:
-            metric_vector /= np.log(norm_scores[i] / 1e7)
+            metric_vector /= norm_scores[i] / 1e7
         for j, v in enumerate(metric_vector):
             scores[(i, j)] = v
     return scores
