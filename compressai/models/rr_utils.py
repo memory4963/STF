@@ -6,14 +6,14 @@ import torch.nn.functional as F
 
 
 def get_remain(vec: CompactorLayer, thr, min_channel=1):
-    return max(min_channel, np.sum(vec.get_metric_vector() >= thr))
+    return max(min_channel, np.sum(vec.get_metric_vector(cal_deps=True) >= thr))
 
 
 def get_group_remain(compactors, thr):
     remaining = np.zeros(compactors[0].num_features)
     for compactor in compactors:
         if not compactor.excluded:
-            remaining = np.logical_or(remaining, compactor.get_metric_vector() >= thr)
+            remaining = np.logical_or(remaining, compactor.get_metric_vector(cal_deps=True) >= thr)
     return np.sum(remaining)
 
 
@@ -23,30 +23,27 @@ def cal_conv_flops(in_ch, out_ch, h, w, ks):
     return in_ch*out_ch*h*w*ks*ks*2
 
 
-def cal_compactor_scores(compactors, norm_scores=None, group_fisher=False):
+def cal_compactor_scores(compactors, norm_scores=None, score_mode="resrep"):
     scores = {}
+    # p = {}
     for i, group in enumerate(compactors):
         cnt = 0
-        if group_fisher:
-            metric_vector = np.zeros_like(group[0].get_fisher())
-            for compactor in group:
-                if not compactor.excluded:
-                    metric_vector += compactor.get_fisher()
+        metric_vector = np.zeros_like(group[0].get_metric_vector())
+        for compactor in group:
+            if not compactor.excluded:
+                metric_vector += compactor.get_metric_vector()
                 cnt += 1
-            # the group fisher uses the square of sum of gradients, so I put the square operation here
-            metric_vector **= 2
-        else:
-            metric_vector = np.zeros_like(group[0].get_metric_vector())
-            for compactor in group:
-                if not compactor.excluded:
-                    metric_vector += compactor.get_metric_vector()
-                cnt += 1
+        # ^2 and abs() are the same for scoring
+        metric_vector = abs(metric_vector)
         if norm_scores is None:
             metric_vector /= cnt
         else:
             metric_vector /= norm_scores[i] / 1e7
         for j, v in enumerate(metric_vector):
             scores[(i, j)] = v
+            # p[i*1000+j] = float(v)
+    # import json
+    # json.dump(p, open('scores7.json', 'w'))
     return scores
 
 
@@ -166,6 +163,7 @@ def cc_model_prune(model, ori_deps, thresh, enhanced_resrep, without_y=False, mi
         save_dict[v['weight'].replace('.conv.', '.')] = save_dict.pop(v['weight'])
         save_dict[v['bias'].replace('.conv.', '.')] = save_dict.pop(v['bias'])
 
+    save_dict = {k: v for k, v in save_dict.items() if '.fisher' not in k and 'accum_grad' not in k}
     save_dict = {k.replace('module.', '') : v for k, v in save_dict.items()}
     final_dict = {
         'state_dict': save_dict,

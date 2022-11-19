@@ -693,7 +693,7 @@ class CCResRep(CC):
 
     def resrep_masking(self, ori_deps, args):
         ori_flops = cal_cc_flops(ori_deps)
-        scores = cal_compactor_scores(self.compactors, self.gene_norm_scores() if self.score_norm else None, args.group_fisher)
+        scores = cal_compactor_scores(self.compactors, self.gene_norm_scores() if self.score_norm else None, args.score_mode)
         cur_deps = self.cal_mask_deps()
         sorted_keys = sorted(scores, key=scores.get)
         cur_flops = cal_cc_flops(cur_deps)
@@ -715,10 +715,12 @@ class CCResRep(CC):
             # 按组mask
             for compactor in self.compactors[key[0]]:
                 compactor.set_mask_to_zero(key[1]) # mask the channel
-        if args.group_fisher:
-            for group in self.compactors:
-                for compactor in group:
-                    compactor.init_fisher()
+        self.reset_grad_records()
+
+    def reset_grad_records(self):
+        for group in self.compactors:
+            for compactor in group:
+                compactor.init_records()
 
     def cal_deps(self, thr=1e-5, min_channel=1):
         deps = {
@@ -982,7 +984,7 @@ class CCResRepWithoutY(CC):
 
     def resrep_masking(self, ori_deps, args):
         ori_flops = cal_cc_flops(ori_deps)
-        scores = cal_compactor_scores(self.compactors, group_fisher=args.group_fisher)
+        scores = cal_compactor_scores(self.compactors, score_mode=args.score_mode)
         cur_deps = self.cal_mask_deps()
         sorted_keys = sorted(scores, key=scores.get)
         cur_flops = cal_cc_flops(cur_deps)
@@ -1004,10 +1006,13 @@ class CCResRepWithoutY(CC):
             # 按组mask
             for compactor in self.compactors[key[0]]:
                 compactor.set_mask_to_zero(key[1]) # mask the channel
-        if args.group_fisher:
-            for group in self.compactors:
-                for compactor in group:
-                    compactor.init_fisher()
+
+        self.reset_grad_records()
+
+    def reset_grad_records(self):
+        for group in self.compactors:
+            for compactor in group:
+                compactor.init_records()
 
     def cal_deps(self, thr=1e-5, min_channel=1):
         deps = {

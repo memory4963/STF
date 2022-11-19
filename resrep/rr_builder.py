@@ -6,9 +6,9 @@ from compressai.layers import GDN
 
 class RRBuilder:
 
-    def __init__(self, group_fisher=False):
+    def __init__(self, score_mode="resrep"):
         self.cur_group_id = -1
-        self.group_fisher = group_fisher
+        self.score_mode = score_mode
 
     def Conv2dRR(self, in_channels, out_channels, kernel_size=3, stride=1, padding=0, dilation=1, groups=1,
                padding_mode='zeros'):
@@ -21,7 +21,7 @@ class RRBuilder:
                                 stride=stride, padding=padding, dilation=dilation, groups=groups, bias=True,
                                 padding_mode=padding_mode)
         se.add_module('conv', conv_layer)
-        se.add_module('compactor', CompactorLayer(num_features=out_channels, group_fisher=self.group_fisher))
+        se.add_module('compactor', CompactorLayer(num_features=out_channels, score_mode=self.score_mode))
         return se
 
     def Conv2dGroupRR(self, in_channels, out_channels, kernel_size=3, stride=1, padding=0, dilation=1, groups=1,
@@ -38,14 +38,14 @@ class RRBuilder:
                                 stride=stride, padding=padding, dilation=dilation, groups=groups, bias=True,
                                 padding_mode=padding_mode)
         se.add_module('conv', conv_layer)
-        se.add_module('compactor', CompactorLayer(num_features=out_channels, group_fisher=self.group_fisher))
+        se.add_module('compactor', CompactorLayer(num_features=out_channels, score_mode=self.score_mode))
         return se
     
     def SingleCompactor(self, channels, excluded):
-        return nn.Sequential(CompactorLayer(channels, excluded=excluded, group_fisher=self.group_fisher))
+        return nn.Sequential(CompactorLayer(channels, excluded=excluded, score_mode=self.score_mode))
 
     def SingleEnhancedCompactor(self, in_channels, out_channels, start_channel, excluded):
-        return nn.Sequential(EnhancedCompactorLayer(in_channels, out_channels, start_channel, excluded=excluded, group_fisher=self.group_fisher))
+        return nn.Sequential(EnhancedCompactorLayer(in_channels, out_channels, start_channel, excluded=excluded, score_mode=self.score_mode))
 
     def ConvTranspose2dRR(self, in_channels, out_channels, kernel_size=3, stride=1, padding=0, dilation=1, groups=1,
                output_padding=0, padding_mode='zeros'):
@@ -58,12 +58,12 @@ class RRBuilder:
                                 stride=stride, padding=padding, dilation=dilation, groups=groups, bias=True,
                                 output_padding=output_padding, padding_mode=padding_mode)
         se.add_module('conv', conv_layer)
-        se.add_module('compactor', CompactorLayer(num_features=out_channels, group_fisher=self.group_fisher))
+        se.add_module('compactor', CompactorLayer(num_features=out_channels, score_mode=self.score_mode))
         return se
 
 # x=0
 class CompactorLayer(nn.Module):
-    def __init__(self, num_features, excluded=False, group_fisher=False):
+    def __init__(self, num_features, excluded=False, score_mode="resrep"):
         super(CompactorLayer, self).__init__()
         self.pwc = nn.Conv2d(in_channels=num_features, out_channels=num_features, kernel_size=1,
                           stride=1, padding=0, bias=False)
@@ -80,12 +80,12 @@ class CompactorLayer(nn.Module):
         init.ones_(self.mask)
         self.num_features = num_features
         self.excluded = excluded
-        self.group_fisher = group_fisher
-        if group_fisher:
-            self.init_fisher()
-            self.saved_output = 0
-            self.register_forward_hook(self.save_input_forward_hook)
-            self.register_backward_hook(self.compute_fisher_backward_hook)
+        self.score_mode = score_mode
+
+        self.init_records()
+        self.saved_output = 0
+        self.register_forward_hook(self.forward_hook)
+        self.register_backward_hook(self.backward_hook)
 
     def forward(self, inputs):
         return self.pwc(inputs)
@@ -123,29 +123,62 @@ class CompactorLayer(nn.Module):
     def get_pwc_kernel(self):
         return self.pwc.weight
 
-    def get_metric_vector(self):
-        metric_vector = torch.sqrt(torch.sum(self.get_pwc_kernel_detach() ** 2, dim=(1, 2, 3))).cpu().numpy()
-        return metric_vector
-
-    def get_fisher(self):
-        return self.fisher.cpu().numpy()
-
-    def save_input_forward_hook(self, module, inputs, outputs):
-        if outputs.requires_grad:
-            self.saved_output = outputs
-
-    def compute_fisher_backward_hook(self, module, grad_input, grad_output):
-        self.fisher += (self.saved_output * grad_output[0]).sum([0, -1, -2])
-
-    def init_fisher(self):
-        if hasattr(self, 'fisher'):
-            self.fisher.zero_()
+    def get_metric_vector(self, cal_deps=False):
+        '''
+        Explanation:
+            `i` is the output channel of compactor
+            `j` is the input channel of compactor
+            `K` is the total number of compactors in one group
+            `k` is the number of a compactor in a group
+            
+            all the operation of `\sum_k` are done outside of this function
+        '''
+        if self.score_mode == 'resrep' or cal_deps:
+            # \sum_k\sqrt{\sum_j (w_{i,j}^k)^2}
+            return torch.sqrt(torch.sum(self.get_pwc_kernel_detach() ** 2, dim=(1, 2, 3))).cpu().numpy()
+        elif self.score_mode == 'fisher_mask':
+            # (\sum_k \partial w_{i}^k)^2
+            # calculate grad on mask instead of compactor weights
+            return self.fisher.cpu().numpy()
+        elif self.score_mode == 'gate_decorator':
+            # \sum_k \sum_j |w_{i,j}^k \cdot \partial w_{i,j}^k|
+            return (self.accum_grad*self.get_pwc_kernel_detach().squeeze()).abs().sum(1).cpu().numpy()
+        elif self.score_mode == 'fisher_gate':
+            # (\sum_k \sum_j |\partial w_{i,j}^k|)^2
+            return self.accum_grad.abs().sum(1).cpu().numpy()
         else:
-            self.register_buffer('fisher', torch.zeros(self.num_features))
+            raise NotImplementedError("not recognized mode: " + self.score_mode)
+
+    def forward_hook(self, module, inputs, outputs):
+        if self.score_mode == 'fisher_mask':
+            if outputs.requires_grad:
+                self.saved_output = outputs
+
+    def backward_hook(self, module, grad_input, grad_output):
+        if self.score_mode == 'fisher_mask':
+            self.fisher += (self.saved_output * grad_output[0]).sum([0, -1, -2])
+
+    def after_backward(self):
+        if self.score_mode == 'gate_decorator' or self.score_mode == 'fisher_gate':
+            self.accum_grad += self.pwc.weight.grad.squeeze()
+
+    def init_records(self):
+        if self.score_mode == 'fisher_mask':
+            if hasattr(self, 'fisher'):
+                self.fisher.zero_()
+            else:
+                self.register_buffer('fisher', torch.zeros(self.num_features))
+        elif self.score_mode == 'gate_decorator' or self.score_mode == 'fisher_gate':
+            if hasattr(self, 'accum_grad'):
+                self.accum_grad.zero_()
+            else:
+                self.register_buffer('accum_grad', torch.zeros(self.num_features, self.num_features))
+
 
 class EnhancedCompactorLayer(CompactorLayer):
-    def __init__(self, in_channels, out_channels, start_channel, excluded=False, group_fisher=False):
-        super().__init__(out_channels, excluded, group_fisher)
+    def __init__(self, in_channels, out_channels, start_channel, excluded=False, score_mode=False):
+        self.in_channels = in_channels
+        super().__init__(out_channels, excluded, score_mode)
 
         self.pwc = nn.Conv2d(in_channels, out_channels, kernel_size=1,
                           stride=1, padding=0, bias=False)
@@ -158,6 +191,14 @@ class EnhancedCompactorLayer(CompactorLayer):
 
         self.pwc.weight.data.copy_(identity_mat.reshape(out_channels, in_channels, 1, 1))
 
-        self.in_channels = in_channels
         self.out_channels = out_channels # equal to self.num_features
         self.start_channel = start_channel
+
+    def init_records(self):
+        if self.score_mode == 'gate_decorator' or self.score_mode == 'fisher_gate':
+            if hasattr(self, 'accum_grad'):
+                self.accum_grad.zero_()
+            else:
+                self.register_buffer('accum_grad', torch.zeros(self.num_features, self.in_channels))
+        else:
+            super().init_records()
