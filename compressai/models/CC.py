@@ -816,6 +816,17 @@ class CCResRep(CC):
             )
         return norm_scores
 
+    @classmethod
+    def from_state_dict(cls, state_dict):
+        """Return a new model instance from `state_dict`."""
+        N = state_dict["g_a.0.weight"].size(0)
+        M = state_dict["g_a.6.weight"].size(0)
+        slice_num = 0
+        while (f'cc_mean_transforms.{slice_num}.0.weight' in state_dict): slice_num+=1
+        if slice_num == 0: slice_num = 10 # just for debug
+        net = cls(RRBuilder(), N, M, slice_num)
+        net.load_state_dict(state_dict)
+        return net
 
     def load_pretrained(self, state_dict):
         update_registered_buffers(
