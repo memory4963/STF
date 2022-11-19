@@ -144,6 +144,7 @@ def train_one_step(model, d, criterion, optimizer, aux_optimizer, lasso_strength
         for compactor in group:
             # mask掉的通道只会继续被降低，丢掉正常的loss
             compactor.mask_weight_grad()
+            compactor.after_backward()
             compactor.add_lasso_penalty(lasso_strength)
 
     optimizer.step()
@@ -282,8 +283,13 @@ def parse_args(argv):
     parser.add_argument("--slow_start", type=int, default=100, help="slow start for pruning to avoid performance crash")
     parser.add_argument("--freeze_main", action="store_true", help="whether freeze main")
     parser.add_argument("--y_excluded", action="store_true", help="whether exclude y when calculate compactor score")
-    parser.add_argument("--score_norm", action="store_true", help="calculate the normed score of channels, conflict with y_excluded")
-    parser.add_argument("--group_fisher", action="store_true", help="change score from sum of squared weight to group fisher")
+    parser.add_argument("--norm", action="store_true", help="calculate the normed score of channels, conflict with y_excluded")
+    parser.add_argument("--score_mode", default="resrep", choices=[
+        "resrep",
+        "fisher_mask",
+        "fisher_gate",
+        "gate_decorator"
+    ], help="choose how to calculate the importance of channels.")
 
     parser.add_argument('--world_size', default=1, type=int, help='number of distributed processes')
     parser.add_argument("--local_rank", default=0, type=int)
@@ -361,10 +367,10 @@ def main(argv):
             pin_memory=(device == "cuda"),
         )
 
-    if args.score_norm and args.y_excluded:
-        raise "score_norm and y_excluded conflict with each other."
+    if args.norm and args.y_excluded:
+        raise "norm and y_excluded conflict with each other."
 
-    model = models[args.model](RRBuilder(args.group_fisher), num_slices=args.num_slices, y_excluded=args.y_excluded, score_norm=args.score_norm)
+    model = models[args.model](RRBuilder(args.score_mode), num_slices=args.num_slices, y_excluded=args.y_excluded, score_norm=args.norm)
     model = model.to(device)
     ori_deps = model.cal_deps(min_channel=args.least_remain_channel)
     print(ori_deps)
@@ -431,6 +437,8 @@ def main(argv):
 
         for i, d in enumerate(train_dataloader):
             resrep_step = step - args.resrep_warmup_step
+            if resrep_step == 0:
+                model.reset_grad_records() # start to record grads after warmup
             if resrep_step > 0 and resrep_step % args.mask_interval == 0:
 
                 # 慢启动, 一开始1/4的剪枝速度，然后1/2，然后正常速度
