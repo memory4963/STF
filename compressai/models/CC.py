@@ -1192,6 +1192,12 @@ class CCResRepPruned(CC):
         # net = cls(N, M)
         net = cls(deps, 192, 320)
         net.load_state_dict(state_dict)
+        names = []
+        for n in state_dict:
+            if '.fisher' in n:
+                names.append(n)
+        for n in names:
+            state_dict.pop(n)
         return net
 
     def ori_deps(self):
