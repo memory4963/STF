@@ -847,7 +847,7 @@ class CCResRep(CC):
 
 
 class CCResRepWithoutY(CC):
-    def __init__(self, builder: RRBuilder, N=192, M=320, num_slices=10, max_support_slices=-1, y_excluded=False, **kwargs):
+    def __init__(self, builder: RRBuilder, N=192, M=320, num_slices=10, max_support_slices=-1, y_excluded=False, score_norm=False, **kwargs):
         super().__init__(N, M, num_slices, max_support_slices, **kwargs)
         self.slice_size = M//num_slices
         self.N = N
