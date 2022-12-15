@@ -167,7 +167,8 @@ def cc_model_prune(model, ori_deps, thresh, enhanced_resrep, without_y=False, mi
     save_dict = {k.replace('module.', '') : v for k, v in save_dict.items()}
     final_dict = {
         'state_dict': save_dict,
-        'deps': pruned_deps
+        'deps': pruned_deps,
+        'keep_portion': pruned_flops/ori_flops
     }
     return final_dict
 

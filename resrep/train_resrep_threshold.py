@@ -310,7 +310,8 @@ def main(argv):
     utils.init_distributed_mode(args)
 
     ori_rd_losses = {
-        0.025: 1.3229
+        0.025: 1.3229,
+        0.0067: 0.7192
     }
 
     if args.seed is not None:
@@ -460,12 +461,13 @@ def main(argv):
                     if avg_loss > ori_rd_losses[args.lmbda]*(1+args.rd_threshold):
                         increasement = avg_loss / ori_rd_losses[args.lmbda] - 1.
                         if args.save:
+                            pruned_model = rr_utils.cc_model_prune(model, ori_deps, args.threshold, enhanced_resrep='enhance' in args.model, without_y='without_y' in args.model, min_channel=args.least_remain_channel)
                             if args.save_path.endswith('.pth.tar'):
                                 save_name = args.save_path[:-8] + '_' + str(epoch) + '_' + str(step) + '_' + str(increasement) + args.save_path[-8:]
-                                pruned_save_name = args.save_path[:-8] + '_pruned_' + str(epoch) + '_' + str(step) + '_' + str(increasement) + args.save_path[-8:]
+                                pruned_save_name = args.save_path[:-8] + '_pruned_' + str(epoch) + '_' + str(step) + '_' + str(increasement) + '_' + str(pruned_model['keep_portion'])[:5] + args.save_path[-8:]
                             else:
                                 save_name = args.save_path.rsplit('.', 1)[0] + '_' + str(epoch) + '_' + str(step) + '_' + str(increasement) + args.save_path.rsplit('.', 1)[1]
-                                pruned_save_name = args.save_path.rsplit('.', 1)[0] + '_pruned_' + str(epoch) + '_' + str(step) + '_' + str(increasement) + args.save_path.rsplit('.', 1)[1]
+                                pruned_save_name = args.save_path.rsplit('.', 1)[0] + '_pruned_' + str(epoch) + '_' + str(step) + '_' + str(increasement) + '_' + str(pruned_model['keep_portion'])[:5] + args.save_path.rsplit('.', 1)[1]
                             save_checkpoint(
                                 {
                                     "epoch": epoch,
@@ -479,9 +481,7 @@ def main(argv):
                                 },
                                 save_name
                             )
-                            save_checkpoint(
-                                rr_utils.cc_model_prune(model, ori_deps, args.threshold, enhanced_resrep='enhance' in args.model, without_y='without_y' in args.model, min_channel=args.least_remain_channel),
-                                pruned_save_name)
+                            save_checkpoint(pruned_model, pruned_save_name)
                     if args.distributed:
                         dist.barrier()
 
