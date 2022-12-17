@@ -454,6 +454,7 @@ def main(argv):
                 # test rd loss
                 if utils.is_main_process() and epoch >= 50 and i < args.mask_interval: # FIXME set least epoch number to 50
                     rd_losses.append(test_epoch(epoch, test_dataloader, net_without_ddp, criterion))
+                    model.train()
                     avg_loss = 0
                     for loss in rd_losses[-rd_losses_num:]:
                         avg_loss += loss
