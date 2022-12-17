@@ -460,7 +460,7 @@ def main(argv):
                         avg_loss += loss
                     avg_loss /= min(rd_losses_num, len(rd_losses))
                     if avg_loss > ori_rd_losses[args.lmbda]*(1+args.rd_threshold):
-                        increasement = avg_loss / ori_rd_losses[args.lmbda] - 1.
+                        increasement = (avg_loss / ori_rd_losses[args.lmbda] - 1.).cpu().numpy()
                         if args.save:
                             pruned_model = rr_utils.cc_model_prune(model, ori_deps, args.threshold, enhanced_resrep='enhance' in args.model, without_y='without_y' in args.model, min_channel=args.least_remain_channel)
                             if args.save_path.endswith('.pth.tar'):
