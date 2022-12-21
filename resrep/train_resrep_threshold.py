@@ -310,8 +310,12 @@ def main(argv):
     utils.init_distributed_mode(args)
 
     ori_rd_losses = {
+        0.0483: 1.7481,
         0.025: 1.3229,
-        0.0067: 0.7192
+        0.013: 0.9869,
+        0.0067: 0.7192,
+        0.0035: 0.5121,
+        0.0018: 0.3548
     }
 
     if args.seed is not None:
