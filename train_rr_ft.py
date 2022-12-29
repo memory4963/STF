@@ -287,6 +287,7 @@ def parse_args(argv):
     )
     parser.add_argument("--checkpoint", type=str, help="Path to a checkpoint")
     parser.add_argument("--pretrained", type=str, help="Path to a pretrained ckpt")
+    parser.add_argument("--freeze_main", action="store_true", help="whether freeze main path")
     parser.add_argument('--world_size', default=1, type=int, help='number of distributed processes')
     parser.add_argument( "--local_rank", default=0, type=int)
     parser.add_argument('--dist_url', default='env://', help='url used to set up distributed training')
@@ -382,6 +383,14 @@ def main(argv):
     else:
         raise Exception("Must start from a pretrained model or a ckpt!")
     net = net.to(device)
+
+    # freeze main path
+    if args.freeze_main:
+        for n, p in net.named_parameters():
+            if n.startswith('g_a'):
+                p.requires_grad = False
+            if n.startswith('g_s'):
+                p.requires_grad = False
 
     net_without_ddp = net
     if args.distributed:
