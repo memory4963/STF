@@ -378,10 +378,14 @@ def main(argv):
     # freeze main path
     if args.freeze_main:
         for n, p in model.named_parameters():
-            if n.startswith('g_a') and not n.startswith('g_a.6'):
+            if n.startswith('g_a'):
                 p.requires_grad = False
-            if n.startswith('g_s') and not n.startswith('g_s.0'):
+            if n.startswith('g_s'):
                 p.requires_grad = False
+            # if n.startswith('g_a') and not n.startswith('g_a.6'):
+            #     p.requires_grad = False
+            # if n.startswith('g_s') and not n.startswith('g_s.0'):
+            #     p.requires_grad = False
 
     net_without_ddp = model
     if args.distributed:
