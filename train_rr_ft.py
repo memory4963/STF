@@ -106,7 +106,8 @@ def configure_optimizers(net, args):
     union_params = parameters | aux_parameters
 
     assert len(inter_params) == 0
-    assert len(union_params) - len(params_dict.keys()) == 0
+    if not args.freeze_main:
+        assert len(union_params) - len(params_dict.keys()) == 0
 
     optimizer = optim.Adam(
         (params_dict[n] for n in sorted(parameters)),
