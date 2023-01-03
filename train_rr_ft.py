@@ -99,15 +99,19 @@ def configure_optimizers(net, args):
         for n, p in net.named_parameters()
         if n.endswith(".quantiles") and p.requires_grad
     }
+    freezed_parameters = {
+        n
+        for n, p in net.named_parameters()
+        if not p.requires_grad
+    }
 
     # Make sure we don't have an intersection of parameters
     params_dict = dict(net.named_parameters())
     inter_params = parameters & aux_parameters
-    union_params = parameters | aux_parameters
+    union_params = parameters | aux_parameters | freezed_parameters
 
     assert len(inter_params) == 0
-    if not args.freeze_main:
-        assert len(union_params) - len(params_dict.keys()) == 0
+    assert len(union_params) - len(params_dict.keys()) == 0
 
     optimizer = optim.Adam(
         (params_dict[n] for n in sorted(parameters)),
@@ -289,6 +293,7 @@ def parse_args(argv):
     parser.add_argument("--checkpoint", type=str, help="Path to a checkpoint")
     parser.add_argument("--pretrained", type=str, help="Path to a pretrained ckpt")
     parser.add_argument("--freeze_main", action="store_true", help="whether freeze main path")
+    parser.add_argument("--freeze_lrp", action="store_true", help="whether freeze lrp")
     parser.add_argument('--world_size', default=1, type=int, help='number of distributed processes')
     parser.add_argument( "--local_rank", default=0, type=int)
     parser.add_argument('--dist_url', default='env://', help='url used to set up distributed training')
@@ -391,6 +396,10 @@ def main(argv):
             if n.startswith('g_a'):
                 p.requires_grad = False
             if n.startswith('g_s'):
+                p.requires_grad = False
+    if args.freeze_lrp:
+        for n, p in net.named_parameters():
+            if n.startswith('lrp_transforms'):
                 p.requires_grad = False
 
     net_without_ddp = net

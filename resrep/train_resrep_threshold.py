@@ -284,6 +284,7 @@ def parse_args(argv):
     parser.add_argument("--rd_threshold", type=float, default=0.02, help="decide when to stop pruning based on how much the rd_loss increase.")
     parser.add_argument("--slow_start", type=int, default=100, help="slow start for pruning to avoid performance crash")
     parser.add_argument("--freeze_main", action="store_true", help="whether freeze main")
+    parser.add_argument("--freeze_lrp", action="store_true", help="whether freeze lrp")
     parser.add_argument("--y_excluded", action="store_true", help="whether exclude y when calculate compactor score")
     parser.add_argument("--norm", action="store_true", help="calculate the normed score of channels, conflict with y_excluded")
     parser.add_argument("--score_mode", default="resrep", choices=[
@@ -394,6 +395,10 @@ def main(argv):
             if n.startswith('g_a'):
                 p.requires_grad = False
             if n.startswith('g_s'):
+                p.requires_grad = False
+    if args.freeze_lrp:
+        for n, p in model.named_parameters():
+            if n.startswith('lrp_transforms'):
                 p.requires_grad = False
 
     net_without_ddp = model
