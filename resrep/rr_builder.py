@@ -99,12 +99,14 @@ class CompactorLayer(nn.Module):
 
     def mask_weight_grad(self):
         weight = self.get_pwc_kernel()
-        weight.grad.data = torch.einsum('i,ijkl->ijkl', self.mask, weight.grad.data)
+        if weight.grad is not None: # some parts of hyperprior to be freezed
+            weight.grad.data = torch.einsum('i,ijkl->ijkl', self.mask, weight.grad.data)
 
     def add_lasso_penalty(self, lasso_strength):
         weight = self.get_pwc_kernel()
-        lasso_grad = weight.data * ((weight.data ** 2).sum(dim=(1, 2, 3), keepdim=True) ** (-0.5))
-        weight.grad.data.add_(lasso_strength, lasso_grad)
+        if weight.grad is not None: # some parts of hyperprior to be freezed
+            lasso_grad = weight.data * ((weight.data ** 2).sum(dim=(1, 2, 3), keepdim=True) ** (-0.5))
+            weight.grad.data.add_(lasso_strength, lasso_grad)
 
     def get_num_mask_ones(self):
         mask_value = self.mask.cpu().numpy()
