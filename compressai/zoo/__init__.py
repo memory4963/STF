@@ -13,7 +13,7 @@
 # limitations under the License.
 
 
-from compressai.models import CCResRepWithoutY, CCEnhancedResRep, CC_manual_prune, CCResRepPruned, CCResRep, CC_RandomSplit, CC_uneven, CC_GD, SymmetricalTransFormer, WACNN, TransformerBasedCoding, DYSTF, CC
+from compressai.models import CCResRepWithoutY, CCEnhancedResRep, CC_manual_prune, CCResRepPruned, CCResRep, CC_RandomSplit, CC_uneven, CC_GD, SymmetricalTransFormer, WACNN, TransformerBasedCoding, DYSTF, CC, CCWithoutLRP
 
 from .pretrained import load_pretrained as load_state_dict
 
@@ -31,4 +31,5 @@ models = {
     'cc_manual_prune': CC_manual_prune,
     'cc_enhanced_resrep': CCEnhancedResRep,
     'cc_resrep_without_y': CCResRepWithoutY,
+    'cc_without_lrp': CCWithoutLRP,
 }
