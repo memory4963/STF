@@ -385,6 +385,8 @@ def main(argv):
         raise "norm and y_excluded conflict with each other."
 
     model = models[args.model](RRBuilder(args.score_mode), num_slices=args.num_slices, y_excluded=args.y_excluded, score_norm=args.norm)
+    without_y = 'without_y' in args.model
+    without_lrp = 'without_y_lrp' in args.model
     model = model.to(device)
     ori_deps = model.cal_deps(min_channel=args.least_remain_channel)
     print(ori_deps)
@@ -473,7 +475,7 @@ def main(argv):
                     if avg_loss > ori_rd_losses[args.lmbda]*(1+args.rd_threshold):
                         increasement = (avg_loss / ori_rd_losses[args.lmbda] - 1.).cpu().numpy()
                         if args.save:
-                            pruned_model = rr_utils.cc_model_prune(model, ori_deps, args.threshold, enhanced_resrep='enhance' in args.model, without_y='without_y' in args.model, min_channel=args.least_remain_channel)
+                            pruned_model = rr_utils.cc_model_prune(model, ori_deps, args.threshold, enhanced_resrep='enhance' in args.model, without_y=without_y, without_lrp=without_lrp, min_channel=args.least_remain_channel)
                             if args.save_path.endswith('.pth.tar'):
                                 save_name = args.save_path[:-8] + '_' + str(epoch) + '_' + str(step) + '_' + str(increasement) + args.save_path[-8:]
                                 pruned_save_name = args.save_path[:-8] + '_pruned_' + str(epoch) + '_' + str(step) + '_' + str(increasement) + '_' + str(pruned_model['keep_portion'])[:5] + args.save_path[-8:]
@@ -559,7 +561,7 @@ def main(argv):
                     save_name
                 )
                 save_checkpoint(
-                    rr_utils.cc_model_prune(model, ori_deps, args.threshold, enhanced_resrep='enhance' in args.model, without_y='without_y' in args.model, min_channel=args.least_remain_channel),
+                    rr_utils.cc_model_prune(model, ori_deps, args.threshold, enhanced_resrep='enhance' in args.model, without_y=without_y, without_lrp=without_lrp, min_channel=args.least_remain_channel),
                     pruned_save_name)
         if args.distributed:
             dist.barrier()

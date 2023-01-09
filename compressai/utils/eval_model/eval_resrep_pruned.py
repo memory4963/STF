@@ -145,7 +145,7 @@ def inference_entropy_estimation(model, x, criterion=None):
         (torch.log(likelihoods).sum() / (-math.log(2) * num_pixels))
         for likelihoods in out_net["likelihoods"].values()
     )
-    plt_energy(out_net, model.gene_splits())
+    # plt_energy(out_net, model.gene_splits())
 
     return {
         "psnr": psnr(x, out_net["x_hat"]),

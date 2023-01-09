@@ -72,15 +72,16 @@ def cal_cc_flops(deps):
         flops += cal_conv_flops(deps['cc_scale_transforms'][i][0], deps['cc_scale_transforms'][i][1], 16, 16, 3)
         flops += cal_conv_flops(deps['cc_scale_transforms'][i][1], deps['cc_scale_transforms'][i][2], 16, 16, 3)
 
-        flops += cal_conv_flops(deps['h_mean_s'][2] + former_ch_sum + deps['cc_mean_transforms'][i][2], deps['lrp_transforms'][i][0], 16, 16, 3)
-        flops += cal_conv_flops(deps['lrp_transforms'][i][0], deps['lrp_transforms'][i][1], 16, 16, 3)
-        flops += cal_conv_flops(deps['lrp_transforms'][i][1], deps['lrp_transforms'][i][2], 16, 16, 3)
+        if 'lrp_transforms' in deps:
+            flops += cal_conv_flops(deps['h_mean_s'][2] + former_ch_sum + deps['cc_mean_transforms'][i][2], deps['lrp_transforms'][i][0], 16, 16, 3)
+            flops += cal_conv_flops(deps['lrp_transforms'][i][0], deps['lrp_transforms'][i][1], 16, 16, 3)
+            flops += cal_conv_flops(deps['lrp_transforms'][i][1], deps['lrp_transforms'][i][2], 16, 16, 3)
         former_ch_sum += deps['cc_mean_transforms'][i][2]
 
     return flops
 
 
-def cc_model_prune(model, ori_deps, thresh, enhanced_resrep, without_y=False, min_channel=1):
+def cc_model_prune(model, ori_deps, thresh, enhanced_resrep, without_y=False, without_lrp=False, min_channel=1):
     table = model.suc_table
     num_slices = model.num_slices
     already_pruned_suc = set()
@@ -97,7 +98,7 @@ def cc_model_prune(model, ori_deps, thresh, enhanced_resrep, without_y=False, mi
     for k, v in cur_state_dict.items():
         v = v.detach().cpu()
         save_dict[k] = v
-    save_dict = CC_tables.pre_split_before_pruning(save_dict, num_slices, enhanced_resrep, without_y)
+    save_dict = CC_tables.pre_split_before_pruning(save_dict, num_slices, enhanced_resrep, without_y, without_lrp)
 
     for k, v in table.items():
         if k in model.group_compactor_names:
@@ -151,7 +152,7 @@ def cc_model_prune(model, ori_deps, thresh, enhanced_resrep, without_y=False, mi
             else:
                 suc_weight = suc_weight[survived_ids.long()]
             save_dict[suc_weight_name] = suc_weight
-    save_dict = CC_tables.post_combine_after_pruning(save_dict, num_slices, without_y)
+    save_dict = CC_tables.post_combine_after_pruning(save_dict, num_slices, without_y, without_lrp)
 
     already_proc = set()
     for k, v in table.items():
