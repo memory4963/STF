@@ -322,11 +322,12 @@ def main(argv):
     }
 
     if args.seed is not None:
-        # seed = args.seed + utils.get_rank()
-        seed = args.seed
+        seed = args.seed + utils.get_rank()
         torch.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
         np.random.seed(seed)
         random.seed(seed)
+        torch.backends.cudnn.deterministic = True
     if utils.is_main_process():
         print(args)
 
