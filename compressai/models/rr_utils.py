@@ -5,8 +5,11 @@ import torch
 import torch.nn.functional as F
 
 
-def get_remain(vec: CompactorLayer, thr, min_channel=1):
-    return max(min_channel, np.sum(vec.get_metric_vector(cal_deps=True) >= thr))
+def get_remain(vec: CompactorLayer, thr, min_channel=1, mask_based=False):
+    if mask_based:
+        return max(min_channel, np.sum(vec.mask.cpu().int().numpy()))
+    else:
+        return max(min_channel, np.sum(vec.get_metric_vector(cal_deps=True) >= thr))
 
 
 def get_group_remain(compactors, thr):
@@ -173,10 +176,17 @@ def cc_model_prune(model, ori_deps, thresh, enhanced_resrep, without_y=False, mi
     return final_dict
 
 
-def cc_model_prune_once(model, thresh, enhanced_resrep, without_y=False, min_channel=1):
+def cc_model_prune_once(model, ori_deps, thresh, enhanced_resrep, without_y=False, min_channel=1):
     table = model.suc_table
     num_slices = model.num_slices
     already_pruned_suc = set()
+
+    pruned_deps = model.cal_deps(thr=thresh, min_channel=min_channel, mask_based=True)
+    pruned_flops = cal_cc_flops(pruned_deps)
+    ori_flops = cal_cc_flops(ori_deps)
+    print('pruned deps: ')
+    print(pruned_deps)
+    print('keep portion: ', pruned_flops/ori_flops)
 
     cur_state_dict = model.state_dict()
     save_dict = {}
@@ -189,10 +199,10 @@ def cc_model_prune_once(model, thresh, enhanced_resrep, without_y=False, min_cha
         if k in model.group_compactor_names:
             # 保证同组的compactor最终的输出维度是一样的
             compactor = (save_dict[k+'.pwc.weight'], list(map(lambda x: save_dict[x+'.pwc.weight'], model.group_compactor_names[k])))
-            mask = (save_dict[k+'.pwc.mask'], list(map(lambda x: save_dict[x+'.pwc.mask'], model.group_compactor_names[k])))
+            mask = (save_dict[k+'.mask'], list(map(lambda x: save_dict[x+'.mask'], model.group_compactor_names[k])))
         else:
             compactor = save_dict[k+'.pwc.weight']
-            mask = save_dict[k+'.pwc.mask']
+            mask = save_dict[k+'.mask']
 
         if v['type'] == 'split':
             for k1 in save_dict:
@@ -253,7 +263,9 @@ def cc_model_prune_once(model, thresh, enhanced_resrep, without_y=False, min_cha
 
     save_dict = {k: v for k, v in save_dict.items() if '.fisher' not in k and 'accum_grad' not in k}
     save_dict = {k.replace('module.', '') : v for k, v in save_dict.items()}
-    return { 'state_dict': save_dict }
+    return { 'state_dict': save_dict,
+             'deps': pruned_deps,
+             'keep_portion': pruned_flops/ori_flops }
 
 
 def fold_conv(fused_k, fused_b, thresh, compactor_mat, deconv=False, min_channel=1):
@@ -305,13 +317,13 @@ def fold_conv_mask(fused_k, fused_b, thresh, compactor_mat, mask, deconv=False, 
 
     if isinstance(compactor_mat, tuple):
         final_mask = torch.zeros_like(mask[1][0])
-        for __compactor_mat in compactor_mat[1]:
-            final_mask = torch.logical_or(final_mask, torch.sqrt(torch.sum(__compactor_mat ** 2, axis=(1, 2, 3))) > thresh)
-        filter_ids_higher_thresh = torch.where(final_mask)[0]
+        for __mask in mask[1]:
+            final_mask = torch.logical_or(final_mask, __mask > 0.5)
+        filter_ids_higher_thresh = torch.where(final_mask > 0.5)[0]
         compactor_mat = compactor_mat[0]
     else:
-        final_mask = torch.sqrt(torch.sum(compactor_mat ** 2, axis=(1, 2, 3)))
-        filter_ids_higher_thresh = torch.where(final_mask > thresh)[0]
+        final_mask = mask
+        filter_ids_higher_thresh = torch.where(final_mask > 0.5)[0]
 
     if len(filter_ids_higher_thresh) < min_channel:
         sortd_ids = torch.argsort(metric_vec)

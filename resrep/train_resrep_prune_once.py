@@ -464,6 +464,7 @@ def main(argv):
             )
         lr_scheduler.step()
         step += 1
+    masked_deps = model.cal_mask_deps()
     while rr_utils.cal_cc_flops(masked_deps)/rr_utils.cal_cc_flops(ori_deps) > args.flops_target:
         model.resrep_masking(ori_deps, args)
         masked_deps = model.cal_mask_deps()
@@ -476,10 +477,10 @@ def main(argv):
         if args.save:
             if args.save_path.endswith('.pth.tar'):
                 save_name = args.save_path[:-8] + '_' + args.save_path[-8:]
-                pruned_save_name = args.save_path[:-8] + '_pruned_' + args.save_path[-8:]
+                pruned_save_name = args.save_path[:-8] + '_pruned' + args.save_path[-8:]
             else:
                 save_name = args.save_path.rsplit('.', 1)[0] + '_' + args.save_path.rsplit('.', 1)[1]
-                pruned_save_name = args.save_path.rsplit('.', 1)[0] + '_pruned_' + args.save_path.rsplit('.', 1)[1]
+                pruned_save_name = args.save_path.rsplit('.', 1)[0] + '_pruned' + args.save_path.rsplit('.', 1)[1]
             save_checkpoint(
                 {
                     "state_dict": model.state_dict(),
@@ -493,7 +494,7 @@ def main(argv):
                 save_name
             )
             save_checkpoint(
-                rr_utils.cc_model_prune_once(model, args.threshold, enhanced_resrep='enhance' in args.model, without_y='without_y' in args.model, min_channel=args.least_remain_channel),
+                rr_utils.cc_model_prune_once(model, ori_deps, args.threshold, enhanced_resrep='enhance' in args.model, without_y='without_y' in args.model, min_channel=args.least_remain_channel),
                 pruned_save_name)
     if args.distributed:
         dist.barrier()
