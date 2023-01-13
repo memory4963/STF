@@ -454,7 +454,7 @@ def main(argv):
             start_time = now_time
             pre_step = i
             print(
-                f'{i*len(d)}/{len(train_dataloader.dataset)}'
+                f'[{i*len(d)}/{len(train_dataloader.dataset)}'
                 f' ({100. * i / len(train_dataloader):.0f}%)]'
                 f'\tLoss: {out_criterion["loss"].item():.3f} |'
                 f'\tMSE loss: {out_criterion["mse_loss"].item() * 255 ** 2 / 3:.3f} |'
