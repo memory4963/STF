@@ -484,16 +484,17 @@ def main(argv):
             lr_scheduler.step()
             step += 1
 
-        if utils.is_main_process() and ((epoch+1) % 10 == 0 or epoch == args.epochs-1):
+        if utils.is_main_process() and ((epoch+1) % 1 == 0 or epoch == args.epochs-1):
             loss = test_epoch(epoch, test_dataloader, net_without_ddp, criterion)
 
             if args.save:
+                pruned_model = rr_utils.cc_model_prune(model, ori_deps, args.threshold, enhanced_resrep='enhance' in args.model, without_y='without_y' in args.model, min_channel=args.least_remain_channel),
                 if args.save_path.endswith('.pth.tar'):
                     save_name = args.save_path[:-8] + '_' + str(epoch) + args.save_path[-8:]
-                    pruned_save_name = args.save_path[:-8] + '_pruned_' + str(epoch) + args.save_path[-8:]
+                    pruned_save_name = args.save_path[:-8] + '_pruned_' + str(pruned_model['keep_portion'])[:5] + '_' + str(epoch) + args.save_path[-8:]
                 else:
                     save_name = args.save_path.rsplit('.', 1)[0] + '_' + str(epoch) + args.save_path.rsplit('.', 1)[1]
-                    pruned_save_name = args.save_path.rsplit('.', 1)[0] + '_pruned_' + str(epoch) + args.save_path.rsplit('.', 1)[1]
+                    pruned_save_name = args.save_path.rsplit('.', 1)[0] + '_pruned_' + str(pruned_model['keep_portion'])[:5] + '_' + str(epoch) + args.save_path.rsplit('.', 1)[1]
                 save_checkpoint(
                     {
                         "epoch": epoch,
@@ -508,7 +509,7 @@ def main(argv):
                     save_name
                 )
                 save_checkpoint(
-                    rr_utils.cc_model_prune(model, ori_deps, args.threshold, enhanced_resrep='enhance' in args.model, without_y='without_y' in args.model, min_channel=args.least_remain_channel),
+                    pruned_model,
                     pruned_save_name)
         if args.distributed:
             dist.barrier()
