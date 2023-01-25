@@ -488,7 +488,7 @@ def main(argv):
             loss = test_epoch(epoch, test_dataloader, net_without_ddp, criterion)
 
             if args.save:
-                pruned_model = rr_utils.cc_model_prune(model, ori_deps, args.threshold, enhanced_resrep='enhance' in args.model, without_y='without_y' in args.model, min_channel=args.least_remain_channel),
+                pruned_model = rr_utils.cc_model_prune(model, ori_deps, args.threshold, enhanced_resrep='enhance' in args.model, without_y='without_y' in args.model, min_channel=args.least_remain_channel)
                 if args.save_path.endswith('.pth.tar'):
                     save_name = args.save_path[:-8] + '_' + str(epoch) + args.save_path[-8:]
                     pruned_save_name = args.save_path[:-8] + '_pruned_' + str(pruned_model['keep_portion'])[:5] + '_' + str(epoch) + args.save_path[-8:]
