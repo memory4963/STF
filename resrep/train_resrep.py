@@ -290,6 +290,7 @@ def parse_args(argv):
         "fisher_gate",
         "gate_decorator"
     ], help="choose how to calculate the importance of channels.")
+    parser.add_argument("--grad_ratio", type=float, default=1., help="power of gradient in gate decorator mode.")
 
     parser.add_argument('--world_size', default=1, type=int, help='number of distributed processes')
     parser.add_argument("--local_rank", default=0, type=int)
@@ -371,7 +372,7 @@ def main(argv):
     if args.norm and args.y_excluded:
         raise "norm and y_excluded conflict with each other."
 
-    model = models[args.model](RRBuilder(args.score_mode), num_slices=args.num_slices, y_excluded=args.y_excluded, score_norm=args.norm)
+    model = models[args.model](RRBuilder(args.score_mode, args.grad_ratio), num_slices=args.num_slices, y_excluded=args.y_excluded, score_norm=args.norm)
     model = model.to(device)
     ori_deps = model.cal_deps(min_channel=args.least_remain_channel)
     print(ori_deps)
