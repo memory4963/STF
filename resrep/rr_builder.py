@@ -6,9 +6,10 @@ from compressai.layers import GDN
 
 class RRBuilder:
 
-    def __init__(self, score_mode="resrep"):
+    def __init__(self, score_mode="resrep", grad_ratio=1.):
         self.cur_group_id = -1
         self.score_mode = score_mode
+        self.grad_ratio = grad_ratio
 
     def Conv2dRR(self, in_channels, out_channels, kernel_size=3, stride=1, padding=0, dilation=1, groups=1,
                padding_mode='zeros'):
@@ -21,7 +22,7 @@ class RRBuilder:
                                 stride=stride, padding=padding, dilation=dilation, groups=groups, bias=True,
                                 padding_mode=padding_mode)
         se.add_module('conv', conv_layer)
-        se.add_module('compactor', CompactorLayer(num_features=out_channels, score_mode=self.score_mode))
+        se.add_module('compactor', CompactorLayer(num_features=out_channels, score_mode=self.score_mode, grad_ratio=self.grad_ratio))
         return se
 
     def Conv2dGroupRR(self, in_channels, out_channels, kernel_size=3, stride=1, padding=0, dilation=1, groups=1,
@@ -38,14 +39,14 @@ class RRBuilder:
                                 stride=stride, padding=padding, dilation=dilation, groups=groups, bias=True,
                                 padding_mode=padding_mode)
         se.add_module('conv', conv_layer)
-        se.add_module('compactor', CompactorLayer(num_features=out_channels, score_mode=self.score_mode))
+        se.add_module('compactor', CompactorLayer(num_features=out_channels, score_mode=self.score_mode, grad_ratio=self.grad_ratio))
         return se
     
     def SingleCompactor(self, channels, excluded):
-        return nn.Sequential(CompactorLayer(channels, excluded=excluded, score_mode=self.score_mode))
+        return nn.Sequential(CompactorLayer(channels, excluded=excluded, score_mode=self.score_mode, grad_ratio=self.grad_ratio))
 
     def SingleEnhancedCompactor(self, in_channels, out_channels, start_channel, excluded):
-        return nn.Sequential(EnhancedCompactorLayer(in_channels, out_channels, start_channel, excluded=excluded, score_mode=self.score_mode))
+        return nn.Sequential(EnhancedCompactorLayer(in_channels, out_channels, start_channel, excluded=excluded, score_mode=self.score_mode, grad_ratio=self.grad_ratio))
 
     def ConvTranspose2dRR(self, in_channels, out_channels, kernel_size=3, stride=1, padding=0, dilation=1, groups=1,
                output_padding=0, padding_mode='zeros'):
@@ -58,11 +59,11 @@ class RRBuilder:
                                 stride=stride, padding=padding, dilation=dilation, groups=groups, bias=True,
                                 output_padding=output_padding, padding_mode=padding_mode)
         se.add_module('conv', conv_layer)
-        se.add_module('compactor', CompactorLayer(num_features=out_channels, score_mode=self.score_mode))
+        se.add_module('compactor', CompactorLayer(num_features=out_channels, score_mode=self.score_mode, grad_ratio=self.grad_ratio))
         return se
 
 class CompactorLayer(nn.Module):
-    def __init__(self, num_features, excluded=False, score_mode="resrep"):
+    def __init__(self, num_features, excluded=False, score_mode="resrep", grad_ratio=1.):
         super(CompactorLayer, self).__init__()
         self.pwc = nn.Conv2d(in_channels=num_features, out_channels=num_features, kernel_size=1,
                           stride=1, padding=0, bias=False)
@@ -82,6 +83,7 @@ class CompactorLayer(nn.Module):
         self.saved_output = 0
         self.register_forward_hook(self.forward_hook)
         self.register_backward_hook(self.backward_hook)
+        self.grad_ratio = grad_ratio
 
     def forward(self, inputs):
         return self.pwc(inputs)
@@ -140,7 +142,7 @@ class CompactorLayer(nn.Module):
             return self.fisher.cpu().numpy()
         elif self.score_mode == 'gate_decorator':
             # \sum_k \sum_j |w_{i,j}^k \cdot \partial w_{i,j}^k|
-            return (self.accum_grad*self.get_pwc_kernel_detach().squeeze()).abs().sum(1).cpu().numpy()
+            return (self.accum_grad**self.grad_ratio*self.get_pwc_kernel_detach().squeeze()).abs().sum(1).cpu().numpy()
         elif self.score_mode == 'fisher_gate':
             # (\sum_k \sum_j |\partial w_{i,j}^k|)^2
             return self.accum_grad.abs().sum(1).cpu().numpy()

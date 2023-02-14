@@ -391,8 +391,6 @@ def main(argv):
     ori_deps = model.cal_deps(min_channel=args.least_remain_channel)
     print(ori_deps)
 
-    main_prune = 'main' in args.model
-
     # freeze main path
     if args.freeze_main:
         for n, p in model.named_parameters():
@@ -439,134 +437,68 @@ def main(argv):
     args.num_per_mask = num_per_mask // 2
     mask_interval = args.mask_interval 
     args.mask_interval = mask_interval * 2
-    if args.rd_cost:
+    if utils.is_main_process():
+        print(f"Learning rate: {optimizer.param_groups[0]['lr']}")
+
+    model.train()
+    device = next(model.parameters()).device
+    start_time = time()
+    pre_step = -1
+
+    for i, d in enumerate(train_dataloader):
+        d = d.to(device)
+        out_criterion, aux_loss = train_one_step(model, d, criterion, optimizer, aux_optimizer, args.lasso_strength, args.distributed, args.clip_max_norm)
+
+        if i % 100 == 0 and utils.is_main_process():
+            now_time = time()
+            left_time = int((now_time-start_time)/(i-pre_step)*(len(train_dataloader)-i))
+            start_time = now_time
+            pre_step = i
+            print(
+                f'[{i*len(d)}/{len(train_dataloader.dataset)}'
+                f' ({100. * i / len(train_dataloader):.0f}%)]'
+                f'\tLoss: {out_criterion["loss"].item():.3f} |'
+                f'\tMSE loss: {out_criterion["mse_loss"].item() * 255 ** 2 / 3:.3f} |'
+                f'\tBpp loss: {out_criterion["bpp_loss"].item():.2f} |'
+                f'\tAux loss: {aux_loss.item():.2f}'
+                f'\tETA: {left_time//3600}:{(left_time%3600)//60}:{left_time%60}'
+            )
+        lr_scheduler.step()
+        step += 1
+    masked_deps = model.cal_mask_deps()
+    while rr_utils.cal_cc_flops(masked_deps)/rr_utils.cal_cc_flops(ori_deps) > args.flops_target:
+        model.resrep_masking(ori_deps, args)
+        masked_deps = model.cal_mask_deps()
+        print(masked_deps)
+        print(rr_utils.cal_cc_flops(masked_deps)/rr_utils.cal_cc_flops(ori_deps))
+
+    if utils.is_main_process():
         loss = test_epoch(0, test_dataloader, net_without_ddp, criterion)
-        print(loss)
-        exit()
-    for epoch in range(last_epoch, args.epochs):
-        if utils.is_main_process():
-            print(f"Learning rate: {optimizer.param_groups[0]['lr']}")
 
-        model.train()
-        device = next(model.parameters()).device
-        start_time = time()
-        pre_step = -1
-
-        # debug
-        # pruned_save_name = args.save_path[:-8] + '_pruned_' + str(epoch) + args.save_path[-8:]
-        # save_checkpoint(rr_utils.cc_model_prune(model, ori_deps, args.threshold, enhanced_resrep='enhance' in args.model, without_y='without_y' in args.model, min_channel=args.least_remain_channel), pruned_save_name)
-        # exit()
-
-        # set rd loss recording, to average the rd loss out of several epoches, here set to 1 epochs
-        rd_losses_num = 1
-        rd_losses = []
-
-        for i, d in enumerate(train_dataloader):
-            resrep_step = step - args.resrep_warmup_step
-            if resrep_step == 0:
-                model.reset_grad_records() # start to record grads after warmup
-            if resrep_step > 0 and resrep_step % args.mask_interval == 0:
-                # test rd loss
-                if utils.is_main_process() and i < args.mask_interval: # FIXME set least epoch number to 50
-                    rd_losses.append(test_epoch(epoch, test_dataloader, net_without_ddp, criterion))
-                    model.train()
-                    avg_loss = 0
-                    for loss in rd_losses[-rd_losses_num:]:
-                        avg_loss += loss
-                    avg_loss /= min(rd_losses_num, len(rd_losses))
-                    if avg_loss > ori_rd_losses[args.lmbda]*(1+args.rd_threshold):
-                        increasement = (avg_loss / ori_rd_losses[args.lmbda] - 1.).cpu().numpy()
-                        if args.save:
-                            pruned_model = rr_utils.cc_model_prune(model, ori_deps, args.threshold, enhanced_resrep='enhance' in args.model, without_y='without_y' in args.model, min_channel=args.least_remain_channel)
-                            if args.save_path.endswith('.pth.tar'):
-                                save_name = args.save_path[:-8] + '_' + str(epoch) + '_' + str(step) + '_' + str(increasement) + args.save_path[-8:]
-                                pruned_save_name = args.save_path[:-8] + '_pruned_' + str(epoch) + '_' + str(step) + '_' + str(increasement) + '_' + str(pruned_model['keep_portion'])[:5] + args.save_path[-8:]
-                            else:
-                                save_name = args.save_path.rsplit('.', 1)[0] + '_' + str(epoch) + '_' + str(step) + '_' + str(increasement) + args.save_path.rsplit('.', 1)[1]
-                                pruned_save_name = args.save_path.rsplit('.', 1)[0] + '_pruned_' + str(epoch) + '_' + str(step) + '_' + str(increasement) + '_' + str(pruned_model['keep_portion'])[:5] + args.save_path.rsplit('.', 1)[1]
-                            save_checkpoint(
-                                {
-                                    "epoch": epoch,
-                                    "state_dict": model.state_dict(),
-                                    "loss": loss,
-                                    "optimizer": optimizer.state_dict(),
-                                    "aux_optimizer": aux_optimizer.state_dict(),
-                                    "lr_scheduler": lr_scheduler.state_dict(),
-                                    "deps": model.cal_deps(min_channel=args.least_remain_channel),
-                                    "args": str(args)
-                                },
-                                save_name
-                            )
-                            save_checkpoint(pruned_model, pruned_save_name)
-                    if args.distributed:
-                        dist.barrier()
-
-                # 慢启动, 一开始1/4的剪枝速度，然后1/2，然后正常速度
-                if resrep_step // (mask_interval*2) > args.slow_start:
-                    args.num_per_mask = num_per_mask
-                    args.mask_interval = mask_interval
-                elif resrep_step // (mask_interval*2) > args.slow_start // 2:
-                    args.num_per_mask = num_per_mask
-                    args.mask_interval = mask_interval * 2
-                else:
-                    args.num_per_mask = num_per_mask // 2
-                    args.mask_interval = mask_interval * 2
-
-                print(f'update mask at step {step}')
-                model.resrep_masking(ori_deps, args)
-                masked_deps = model.cal_mask_deps()
-                print(masked_deps)
-                print(rr_utils.cal_cc_flops(masked_deps, main_prune)/rr_utils.cal_cc_flops(ori_deps, main_prune))
-            d = d.to(device)
-            out_criterion, aux_loss = train_one_step(model, d, criterion, optimizer, aux_optimizer, args.lasso_strength, args.distributed, args.clip_max_norm)
-
-            if i % 100 == 0 and utils.is_main_process():
-                now_time = time()
-                left_time = int((now_time-start_time)/(i-pre_step)*(len(train_dataloader)-i))
-                start_time = now_time
-                pre_step = i
-                print(
-                    f'Train epoch {epoch}: ['
-                    f'{i*len(d)}/{len(train_dataloader.dataset)}'
-                    f' ({100. * i / len(train_dataloader):.0f}%)]'
-                    f'\tLoss: {out_criterion["loss"].item():.3f} |'
-                    f'\tMSE loss: {out_criterion["mse_loss"].item() * 255 ** 2 / 3:.3f} |'
-                    f'\tBpp loss: {out_criterion["bpp_loss"].item():.2f} |'
-                    f'\tAux loss: {aux_loss.item():.2f}'
-                    f'\tETA: {left_time//3600}:{(left_time%3600)//60}:{left_time%60}'
-                )
-
-            lr_scheduler.step()
-            step += 1
-
-        if utils.is_main_process() and ((epoch+1) % 20 == 0 or epoch == args.epochs-1):
-            loss = test_epoch(epoch, test_dataloader, net_without_ddp, criterion)
-
-            if args.save:
-                if args.save_path.endswith('.pth.tar'):
-                    save_name = args.save_path[:-8] + '_' + str(epoch) + args.save_path[-8:]
-                    pruned_save_name = args.save_path[:-8] + '_pruned_' + str(epoch) + args.save_path[-8:]
-                else:
-                    save_name = args.save_path.rsplit('.', 1)[0] + '_' + str(epoch) + args.save_path.rsplit('.', 1)[1]
-                    pruned_save_name = args.save_path.rsplit('.', 1)[0] + '_pruned_' + str(epoch) + args.save_path.rsplit('.', 1)[1]
-                save_checkpoint(
-                    {
-                        "epoch": epoch,
-                        "state_dict": model.state_dict(),
-                        "loss": loss,
-                        "optimizer": optimizer.state_dict(),
-                        "aux_optimizer": aux_optimizer.state_dict(),
-                        "lr_scheduler": lr_scheduler.state_dict(),
-                        "deps": model.cal_deps(min_channel=args.least_remain_channel),
-                        "args": str(args)
-                    },
-                    save_name
-                )
-                save_checkpoint(
-                    rr_utils.cc_model_prune(model, ori_deps, args.threshold, enhanced_resrep='enhance' in args.model, without_y='without_y' in args.model, min_channel=args.least_remain_channel, main_prune=main_prune),
-                    pruned_save_name)
-        if args.distributed:
-            dist.barrier()
+        if args.save:
+            if args.save_path.endswith('.pth.tar'):
+                save_name = args.save_path[:-8] + '_' + args.save_path[-8:]
+                pruned_save_name = args.save_path[:-8] + '_pruned' + args.save_path[-8:]
+            else:
+                save_name = args.save_path.rsplit('.', 1)[0] + '_' + args.save_path.rsplit('.', 1)[1]
+                pruned_save_name = args.save_path.rsplit('.', 1)[0] + '_pruned' + args.save_path.rsplit('.', 1)[1]
+            save_checkpoint(
+                {
+                    "state_dict": model.state_dict(),
+                    "loss": loss,
+                    "optimizer": optimizer.state_dict(),
+                    "aux_optimizer": aux_optimizer.state_dict(),
+                    "lr_scheduler": lr_scheduler.state_dict(),
+                    "deps": model.cal_deps(min_channel=args.least_remain_channel),
+                    "args": str(args)
+                },
+                save_name
+            )
+            save_checkpoint(
+                rr_utils.cc_model_prune_once(model, ori_deps, args.threshold, enhanced_resrep='enhance' in args.model, without_y='without_y' in args.model, min_channel=args.least_remain_channel),
+                pruned_save_name)
+    if args.distributed:
+        dist.barrier()
 
 
 if __name__ == "__main__":
