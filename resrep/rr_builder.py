@@ -61,7 +61,6 @@ class RRBuilder:
         se.add_module('compactor', CompactorLayer(num_features=out_channels, score_mode=self.score_mode))
         return se
 
-# x=0
 class CompactorLayer(nn.Module):
     def __init__(self, num_features, excluded=False, score_mode="resrep"):
         super(CompactorLayer, self).__init__()
@@ -71,9 +70,6 @@ class CompactorLayer(nn.Module):
 
         # debug
         # identity_mat[0,0] = 0.
-        # global x
-        # identity_mat[x%num_features, x%num_features] = 0.
-        # x += 1
 
         self.pwc.weight.data.copy_(torch.from_numpy(identity_mat).reshape(num_features, num_features, 1, 1))
         self.register_buffer('mask', torch.ones(num_features))

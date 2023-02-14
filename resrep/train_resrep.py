@@ -376,6 +376,8 @@ def main(argv):
     ori_deps = model.cal_deps(min_channel=args.least_remain_channel)
     print(ori_deps)
 
+    main_prune = 'main' in args.model
+
     # freeze main path
     if args.freeze_main:
         for n, p in model.named_parameters():
@@ -437,7 +439,7 @@ def main(argv):
 
         # debug
         # pruned_save_name = args.save_path[:-8] + '_pruned_' + str(epoch) + args.save_path[-8:]
-        # save_checkpoint(rr_utils.cc_model_prune(model, ori_deps, args.threshold, enhanced_resrep='enhance' in args.model, without_y='without_y' in args.model, min_channel=args.least_remain_channel), pruned_save_name)
+        # save_checkpoint(rr_utils.cc_model_prune(model, ori_deps, args.threshold, enhanced_resrep='enhance' in args.model, without_y='without_y' in args.model, min_channel=args.least_remain_channel, main_prune=main_prune), pruned_save_name)
         # exit()
 
         for i, d in enumerate(train_dataloader):
@@ -461,7 +463,7 @@ def main(argv):
                 model.resrep_masking(ori_deps, args)
                 masked_deps = model.cal_mask_deps()
                 print(masked_deps)
-                print(rr_utils.cal_cc_flops(masked_deps)/rr_utils.cal_cc_flops(ori_deps))
+                print(rr_utils.cal_cc_flops(masked_deps, main_prune)/rr_utils.cal_cc_flops(ori_deps, main_prune))
             d = d.to(device)
             out_criterion, aux_loss = train_one_step(model, d, criterion, optimizer, aux_optimizer, args.lasso_strength, args.distributed, args.clip_max_norm)
 
@@ -508,7 +510,7 @@ def main(argv):
                     save_name
                 )
                 save_checkpoint(
-                    rr_utils.cc_model_prune(model, ori_deps, args.threshold, enhanced_resrep='enhance' in args.model, without_y='without_y' in args.model, min_channel=args.least_remain_channel),
+                    rr_utils.cc_model_prune(model, ori_deps, args.threshold, enhanced_resrep='enhance' in args.model, without_y='without_y' in args.model, min_channel=args.least_remain_channel, main_prune=main_prune),
                     pruned_save_name)
         if args.distributed:
             dist.barrier()

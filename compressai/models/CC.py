@@ -166,6 +166,8 @@ class CC(CompressionModel):
             "x_hat": x_hat,
             "likelihoods": {"y": y_likelihoods, "z": z_likelihoods},
         }
+        # a = self.compress(x)
+        # return self.decompress(a['strings'], a['shape'])
     
     def split_slices(self, y):
         return y.chunk(self.num_slices, 1)
@@ -533,6 +535,104 @@ class CC_RandomSplit(CC):
         splits = [self.slices[0]]
         splits += [self.slices[i+1]-self.slices[i] for i in range(len(self.slices)-1)]
         return y.split(splits, dim=1)
+
+
+class CCMainPrune(CC):
+    def __init__(self, builder: RRBuilder, N=192, M=320, num_slices=10, y_excluded=False, score_norm=False, max_support_slices=-1, **kwargs):
+        super().__init__(N, M, num_slices, max_support_slices, **kwargs)
+
+        self.M = M
+
+        self.g_a = nn.Sequential(
+            builder.Conv2dRR(3, N, kernel_size=5, stride=2, padding=2),
+            GDN(N),
+            builder.Conv2dRR(N, N, kernel_size=5, stride=2, padding=2),
+            GDN(N),
+            builder.Conv2dRR(N, N, kernel_size=5, stride=2, padding=2),
+            GDN(N),
+            conv(N, M),
+        )
+
+        self.g_s = nn.Sequential(
+            builder.ConvTranspose2dRR(M, N, kernel_size=5, stride=2, padding=2, output_padding=1),
+            GDN(N, inverse=True),
+            builder.ConvTranspose2dRR(N, N, kernel_size=5, stride=2, padding=2, output_padding=1),
+            GDN(N, inverse=True),
+            builder.ConvTranspose2dRR(N, N, kernel_size=5, stride=2, padding=2, output_padding=1),
+            GDN(N, inverse=True),
+            deconv(N, 3),
+        )
+
+        self.compactors = [(self.g_a[0][1],), (self.g_a[2][1],) ,(self.g_a[4][1],),
+                           (self.g_s[0][1],), (self.g_s[2][1],) ,(self.g_s[4][1],)]
+        self.suc_table = {
+            'g_a.0.compactor': {'weight': 'g_a.0.conv.weight', 'bias': 'g_a.0.conv.bias', 'suc_weight': ['g_a.2.conv.weight'], 'conv': True, 'suc_conv': [True], 'type': 'main', 'gdn': 'g_a.1.'},
+            'g_a.2.compactor': {'weight': 'g_a.2.conv.weight', 'bias': 'g_a.2.conv.bias', 'suc_weight': ['g_a.4.conv.weight'], 'conv': True, 'suc_conv': [True], 'type': 'main', 'gdn': 'g_a.3.'},
+            'g_a.4.compactor': {'weight': 'g_a.4.conv.weight', 'bias': 'g_a.4.conv.bias', 'suc_weight': ['g_a.6.weight'], 'conv': True, 'suc_conv': [True], 'type': 'main', 'gdn': 'g_a.5.'},
+            'g_s.0.compactor': {'weight': 'g_s.0.conv.weight', 'bias': 'g_s.0.conv.bias', 'suc_weight': ['g_s.2.conv.weight'], 'conv': False, 'suc_conv': [False], 'type': 'main', 'gdn': 'g_s.1.'},
+            'g_s.2.compactor': {'weight': 'g_s.2.conv.weight', 'bias': 'g_s.2.conv.bias', 'suc_weight': ['g_s.4.conv.weight'], 'conv': False, 'suc_conv': [False], 'type': 'main', 'gdn': 'g_s.3.'},
+            'g_s.4.compactor': {'weight': 'g_s.4.conv.weight', 'bias': 'g_s.4.conv.bias', 'suc_weight': ['g_s.6.weight'], 'conv': False, 'suc_conv': [False], 'type': 'main', 'gdn': 'g_s.5.'},
+        }
+        self.group_compactor_names = []
+
+    def resrep_masking(self, ori_deps, args):
+        ori_flops = cal_cc_main_flops(ori_deps)
+        scores = cal_compactor_scores(self.compactors, score_mode=args.score_mode)
+        cur_deps = self.cal_mask_deps()
+        sorted_keys = sorted(scores, key=scores.get)
+        cur_flops = cal_cc_main_flops(cur_deps)
+
+        # 这步保证了不会过度裁剪
+        if cur_flops <= args.flops_target * ori_flops:
+            return
+
+        i = 0
+        for key in sorted_keys:
+            if i == args.num_per_mask:
+                break
+            if self.compactors[key[0]][0].mask[key[1]] == 0: # already masked, skip
+                continue
+            i += 1
+            if self.compactors[key[0]][0].get_num_mask_ones() <= args.least_remain_channel: # no more channel in this layer should be masked
+                continue
+            
+            # 按组mask
+            for compactor in self.compactors[key[0]]:
+                compactor.set_mask_to_zero(key[1]) # mask the channel
+
+        self.reset_grad_records()
+
+    def reset_grad_records(self):
+        for group in self.compactors:
+            for compactor in group:
+                compactor.init_records()
+
+    def cal_deps(self, thr=1e-5, min_channel=1):
+        deps = list(map(lambda x: get_remain(x[0], thr, min_channel), self.compactors))
+        deps.insert(3, self.M)
+        return deps
+
+    def cal_mask_deps(self):
+        deps = list(map(lambda x: x[0].get_num_mask_ones(), self.compactors))
+        deps.insert(3, self.M)
+        return deps
+
+    def load_pretrained(self, state_dict):
+        update_registered_buffers(
+            self.gaussian_conditional,
+            "gaussian_conditional",
+            ["_quantized_cdf", "_offset", "_cdf_length", "scale_table"],
+            state_dict,
+        )
+        cur_state_dict = self.state_dict()
+        for k in state_dict:
+            if k not in cur_state_dict:
+                cur_k = k.rsplit('.', 1)[0]+'.conv.'+k.rsplit('.', 1)[1]
+                assert cur_k in cur_state_dict
+                cur_state_dict[cur_k] = state_dict[k]
+            else:
+                cur_state_dict[k] = state_dict[k]
+        super().load_state_dict(cur_state_dict)
 
 
 class CCResRep(CC):
@@ -1202,6 +1302,53 @@ class CCResRepPruned(CC):
 
     def ori_deps(self):
         return {'h_a': [320, 256, 192], 'h_mean_s': [192, 256, 320], 'h_scale_s': [192, 256, 320], 'cc_mean_transforms': [[224, 128, 32], [245, 138, 32], [266, 149, 32], [288, 160, 32], [309, 170, 32], [330, 181, 32], [352, 192, 32], [373, 202, 32], [394, 213, 32], [416, 224, 32]], 'cc_scale_transforms': [[224, 128, 32], [245, 138, 32], [266, 149, 32], [288, 160, 32], [309, 170, 32], [330, 181, 32], [352, 192, 32], [373, 202, 32], [394, 213, 32], [416, 224, 32]], 'lrp_transforms': [[224, 128, 32], [245, 138, 32], [266, 149, 32], [288, 160, 32], [309, 170, 32], [330, 181, 32], [352, 192, 32], [373, 202, 32], [394, 213, 32], [416, 224, 32]], 'y': 320}
+
+
+class CCResRepMainPruned(CC):
+    def __init__(self, deps, N=192, M=320, num_slices=10, max_support_slices=-1, **kwargs):
+        super().__init__(N, M, num_slices, max_support_slices, **kwargs)
+        self.slice_size = M//num_slices
+        self.deps = deps
+        self.N = N
+        self.M = M
+        self.g_a = nn.Sequential(
+            conv(3, deps[0]),
+            GDN(deps[0]),
+            conv(deps[0], deps[1]),
+            GDN(deps[1]),
+            conv(deps[1], deps[2]),
+            GDN(deps[2]),
+            conv(deps[2], deps[3]),
+        )
+
+        self.g_s = nn.Sequential(
+            deconv(deps[3], deps[4]),
+            GDN(deps[4], inverse=True),
+            deconv(deps[4], deps[5]),
+            GDN(deps[5], inverse=True),
+            deconv(deps[5], deps[6]),
+            GDN(deps[6], inverse=True),
+            deconv(deps[6], 3),
+        )
+
+    @classmethod
+    def from_state_dict(cls, state_dict, deps):
+        """Return a new model instance from `state_dict`."""
+        # N = state_dict["g_a.0.weight"].size(0)
+        # M = state_dict["g_a.6.weight"].size(0)
+        # net = cls(N, M)
+        net = cls(deps, 192, 320)
+        net.load_state_dict(state_dict)
+        names = []
+        for n in state_dict:
+            if '.fisher' in n:
+                names.append(n)
+        for n in names:
+            state_dict.pop(n)
+        return net
+
+    def ori_deps(self):
+        return [192, 192, 192, 320, 192, 192, 192]
 
 
 class CC_manual_prune(CC):

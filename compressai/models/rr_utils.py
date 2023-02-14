@@ -51,7 +51,9 @@ def already_masked(compactor: CompactorLayer, k):
     return compactor.mask[k] == 0
 
 
-def cal_cc_flops(deps):
+def cal_cc_flops(deps, main_prune=False):
+    if main_prune:
+        return cal_cc_main_flops(deps)
     flops = cal_conv_flops(deps['y'], deps['h_a'][0], 16, 16, 3)
     flops += cal_conv_flops(deps['h_a'][0], deps['h_a'][1], 8, 8, 5)
     flops += cal_conv_flops(deps['h_a'][1], deps['h_a'][2], 4, 4, 5)
@@ -79,17 +81,29 @@ def cal_cc_flops(deps):
 
     return flops
 
+def cal_cc_main_flops(deps):
+    flops = cal_conv_flops(3, deps[0], 128, 128, 5)
+    flops += cal_conv_flops(deps[0], deps[1], 64, 64, 5)
+    flops += cal_conv_flops(deps[1], deps[2], 32, 32, 5)
+    flops += cal_conv_flops(deps[2], deps[3], 16, 16, 5)
+    flops += cal_conv_flops(deps[3], deps[4], 16, 16, 5)
+    flops += cal_conv_flops(deps[4], deps[5], 32, 32, 5)
+    flops += cal_conv_flops(deps[5], deps[6], 64, 64, 5)
+    flops += cal_conv_flops(deps[6], 3, 128, 128, 5)
+    return flops
 
-def cc_model_prune(model, ori_deps, thresh, enhanced_resrep, without_y=False, min_channel=1):
+
+def cc_model_prune(model, ori_deps, thresh, enhanced_resrep, without_y=False, min_channel=1, main_prune=False):
     table = model.suc_table
     num_slices = model.num_slices
     already_pruned_suc = set()
 
     pruned_deps = model.cal_deps(thr=thresh, min_channel=min_channel)
-    pruned_flops = cal_cc_flops(pruned_deps)
-    ori_flops = cal_cc_flops(ori_deps)
+    pruned_flops = cal_cc_flops(pruned_deps, main_prune)
+    ori_flops = cal_cc_flops(ori_deps, main_prune)
     print('pruned deps: ')
     print(pruned_deps)
+    # pruned_deps['h_a'][2] -= 1
     print('keep portion: ', pruned_flops/ori_flops)
 
     cur_state_dict = model.state_dict()
@@ -97,7 +111,8 @@ def cc_model_prune(model, ori_deps, thresh, enhanced_resrep, without_y=False, mi
     for k, v in cur_state_dict.items():
         v = v.detach().cpu()
         save_dict[k] = v
-    save_dict = CC_tables.pre_split_before_pruning(save_dict, num_slices, enhanced_resrep, without_y)
+    if not main_prune:
+        save_dict = CC_tables.pre_split_before_pruning(save_dict, num_slices, enhanced_resrep, without_y)
 
     for k, v in table.items():
         if k in model.group_compactor_names:
@@ -127,6 +142,12 @@ def cc_model_prune(model, ori_deps, thresh, enhanced_resrep, without_y=False, mi
             save_dict[weight_name] = pruned_weight
             save_dict[bias_name] = pruned_bias
 
+        # set GDN
+        if v['type'] == 'main':
+            save_dict[v['gdn']+'beta'] = save_dict[v['gdn']+'beta'][survived_ids]
+            save_dict[v['gdn']+'gamma'] = save_dict[v['gdn']+'gamma'][survived_ids]
+            save_dict[v['gdn']+'gamma'] = save_dict[v['gdn']+'gamma'][:, survived_ids]
+
         # change bottleneck
         if v['type'] == 'bottleneck':
             for bk, bv in save_dict.items():
@@ -151,7 +172,8 @@ def cc_model_prune(model, ori_deps, thresh, enhanced_resrep, without_y=False, mi
             else:
                 suc_weight = suc_weight[survived_ids.long()]
             save_dict[suc_weight_name] = suc_weight
-    save_dict = CC_tables.post_combine_after_pruning(save_dict, num_slices, without_y)
+    if not main_prune:
+        save_dict = CC_tables.post_combine_after_pruning(save_dict, num_slices, without_y)
 
     already_proc = set()
     for k, v in table.items():
