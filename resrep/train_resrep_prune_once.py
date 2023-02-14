@@ -445,60 +445,64 @@ def main(argv):
     start_time = time()
     pre_step = -1
 
-    for i, d in enumerate(train_dataloader):
-        d = d.to(device)
-        out_criterion, aux_loss = train_one_step(model, d, criterion, optimizer, aux_optimizer, args.lasso_strength, args.distributed, args.clip_max_norm)
+    per_t = (1.0-args.flops_target)/args.epochs
 
-        if i % 100 == 0 and utils.is_main_process():
-            now_time = time()
-            left_time = int((now_time-start_time)/(i-pre_step)*(len(train_dataloader)-i))
-            start_time = now_time
-            pre_step = i
-            print(
-                f'[{i*len(d)}/{len(train_dataloader.dataset)}'
-                f' ({100. * i / len(train_dataloader):.0f}%)]'
-                f'\tLoss: {out_criterion["loss"].item():.3f} |'
-                f'\tMSE loss: {out_criterion["mse_loss"].item() * 255 ** 2 / 3:.3f} |'
-                f'\tBpp loss: {out_criterion["bpp_loss"].item():.2f} |'
-                f'\tAux loss: {aux_loss.item():.2f}'
-                f'\tETA: {left_time//3600}:{(left_time%3600)//60}:{left_time%60}'
-            )
-        lr_scheduler.step()
-        step += 1
-    masked_deps = model.cal_mask_deps()
-    while rr_utils.cal_cc_flops(masked_deps)/rr_utils.cal_cc_flops(ori_deps) > args.flops_target:
-        model.resrep_masking(ori_deps, args)
+    for epoch in range(last_epoch, args.epochs):
+        for i, d in enumerate(train_dataloader):
+            d = d.to(device)
+            out_criterion, aux_loss = train_one_step(model, d, criterion, optimizer, aux_optimizer, args.lasso_strength, args.distributed, args.clip_max_norm)
+
+            if i % 100 == 0 and utils.is_main_process():
+                now_time = time()
+                left_time = int((now_time-start_time)/(i-pre_step)*(len(train_dataloader)-i))
+                start_time = now_time
+                pre_step = i
+                print(
+                    f'[{i*len(d)}/{len(train_dataloader.dataset)}'
+                    f' ({100. * i / len(train_dataloader):.0f}%)]'
+                    f'\tLoss: {out_criterion["loss"].item():.3f} |'
+                    f'\tMSE loss: {out_criterion["mse_loss"].item() * 255 ** 2 / 3:.3f} |'
+                    f'\tBpp loss: {out_criterion["bpp_loss"].item():.2f} |'
+                    f'\tAux loss: {aux_loss.item():.2f}'
+                    f'\tETA: {left_time//3600}:{(left_time%3600)//60}:{left_time%60}'
+                )
+            lr_scheduler.step()
+            step += 1
         masked_deps = model.cal_mask_deps()
-        print(masked_deps)
-        print(rr_utils.cal_cc_flops(masked_deps)/rr_utils.cal_cc_flops(ori_deps))
+        t = 1.0 - per_t*(epoch+1)
+        while rr_utils.cal_cc_flops(masked_deps)/rr_utils.cal_cc_flops(ori_deps) > t:
+            model.resrep_masking(ori_deps, args)
+            masked_deps = model.cal_mask_deps()
+            print(masked_deps)
+            print(rr_utils.cal_cc_flops(masked_deps)/rr_utils.cal_cc_flops(ori_deps))
 
-    if utils.is_main_process():
-        loss = test_epoch(0, test_dataloader, net_without_ddp, criterion)
+        if utils.is_main_process():
+            loss = test_epoch(0, test_dataloader, net_without_ddp, criterion)
 
-        if args.save:
-            if args.save_path.endswith('.pth.tar'):
-                save_name = args.save_path[:-8] + '_' + args.save_path[-8:]
-                pruned_save_name = args.save_path[:-8] + '_pruned' + args.save_path[-8:]
-            else:
-                save_name = args.save_path.rsplit('.', 1)[0] + '_' + args.save_path.rsplit('.', 1)[1]
-                pruned_save_name = args.save_path.rsplit('.', 1)[0] + '_pruned' + args.save_path.rsplit('.', 1)[1]
-            save_checkpoint(
-                {
-                    "state_dict": model.state_dict(),
-                    "loss": loss,
-                    "optimizer": optimizer.state_dict(),
-                    "aux_optimizer": aux_optimizer.state_dict(),
-                    "lr_scheduler": lr_scheduler.state_dict(),
-                    "deps": model.cal_deps(min_channel=args.least_remain_channel),
-                    "args": str(args)
-                },
-                save_name
-            )
-            save_checkpoint(
-                rr_utils.cc_model_prune_once(model, ori_deps, args.threshold, enhanced_resrep='enhance' in args.model, without_y='without_y' in args.model, min_channel=args.least_remain_channel),
-                pruned_save_name)
-    if args.distributed:
-        dist.barrier()
+            if args.save:
+                if args.save_path.endswith('.pth.tar'):
+                    save_name = args.save_path[:-8] + '_' + args.save_path[-8:]
+                    pruned_save_name = args.save_path[:-8] + '_pruned_' + str(f'%.3f' % t) + args.save_path[-8:]
+                else:
+                    save_name = args.save_path.rsplit('.', 1)[0] + '_' + args.save_path.rsplit('.', 1)[1]
+                    pruned_save_name = args.save_path.rsplit('.', 1)[0] + '_pruned_' + str(f'%.3f' % t) + args.save_path.rsplit('.', 1)[1]
+                save_checkpoint(
+                    {
+                        "state_dict": model.state_dict(),
+                        "loss": loss,
+                        "optimizer": optimizer.state_dict(),
+                        "aux_optimizer": aux_optimizer.state_dict(),
+                        "lr_scheduler": lr_scheduler.state_dict(),
+                        "deps": model.cal_deps(min_channel=args.least_remain_channel),
+                        "args": str(args)
+                    },
+                    save_name
+                )
+                save_checkpoint(
+                    rr_utils.cc_model_prune_once(model, ori_deps, args.threshold, enhanced_resrep='enhance' in args.model, without_y='without_y' in args.model, min_channel=args.least_remain_channel),
+                    pruned_save_name)
+        if args.distributed:
+            dist.barrier()
 
 
 if __name__ == "__main__":

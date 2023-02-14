@@ -467,7 +467,7 @@ def main(argv):
                 model.reset_grad_records() # start to record grads after warmup
             if resrep_step > 0 and resrep_step % args.mask_interval == 0:
                 # test rd loss
-                if utils.is_main_process() and i < args.mask_interval: # FIXME set least epoch number to 50
+                if utils.is_main_process() and i <= args.mask_interval: # FIXME set least epoch number to 50
                     rd_losses.append(test_epoch(epoch, test_dataloader, net_without_ddp, criterion))
                     model.train()
                     avg_loss = 0
