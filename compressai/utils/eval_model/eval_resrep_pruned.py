@@ -23,6 +23,7 @@ import time
 from collections import defaultdict
 from typing import List
 import matplotlib.pyplot as plt
+from tqdm import tqdm
 
 import numpy as np
 import torch
@@ -145,7 +146,7 @@ def inference_entropy_estimation(model, x, criterion=None):
         (torch.log(likelihoods).sum() / (-math.log(2) * num_pixels))
         for likelihoods in out_net["likelihoods"].values()
     )
-    plt_energy(out_net, model.gene_splits())
+    # plt_energy(out_net, model.gene_splits())
 
     return {
         "psnr": psnr(x, out_net["x_hat"]),
@@ -189,8 +190,7 @@ def plt_energy(out_net, splits):
 def eval_model(model, filepaths, entropy_estimation=False, half=False, recon_path='reconstruction'):
     device = next(model.parameters()).device
     metrics = defaultdict(float)
-    for f in filepaths:
-        print(f)
+    for f in tqdm(filepaths):
         _filename = f.split("/")[-1]
 
         x = read_image(f).to(device)
@@ -269,6 +269,7 @@ def setup_args():
 def main(argv):
     parser = setup_args()
     args = parser.parse_args(argv)
+    main_prune = 'main' in args.architecture
 
     filepaths = collect_images(args.dataset)
     if len(filepaths) == 0:
@@ -290,7 +291,7 @@ def main(argv):
         model = load_func(*opts, run)
 
         # calculate remaining flops
-        print('remaining flops:', cal_cc_flops(model.deps)/cal_cc_flops(model.ori_deps()))
+        print('remaining flops:', cal_cc_flops(model.deps, main_prune)/cal_cc_flops(model.ori_deps(), main_prune))
 
         if args.cuda and torch.cuda.is_available():
             model = model.to("cuda")
