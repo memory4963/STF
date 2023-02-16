@@ -433,10 +433,10 @@ def main(argv):
 
     step = last_epoch*len(train_dataloader)
 
-    num_per_mask = args.num_per_mask
-    args.num_per_mask = num_per_mask // 2
-    mask_interval = args.mask_interval 
-    args.mask_interval = mask_interval * 2
+    # num_per_mask = args.num_per_mask
+    # args.num_per_mask = num_per_mask // 2
+    # mask_interval = args.mask_interval 
+    # args.mask_interval = mask_interval * 2
     if utils.is_main_process():
         print(f"Learning rate: {optimizer.param_groups[0]['lr']}")
 
